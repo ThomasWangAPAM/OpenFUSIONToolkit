@@ -331,7 +331,8 @@ def test_spheromak_h3(order):
 def run_coil_case(mesh_resolution,fe_order,dist,mp_q):
     px1,py1,pdx,pdy = 0.4,0.4,0.2,0.2
     cx1,cy1,cdx,cdy = 0.8,0.8,0.1,0.1
-    def coil_green(rc,zc,r,z):
+    cx2,cy2 = 0.8,0.4
+    def coil_green(zc,rc,r,z):
         if dist is None:
             return eval_green(np.array([[r,z]]),np.array([rc,zc]))[0]
         else:
@@ -346,13 +347,21 @@ def run_coil_case(mesh_resolution,fe_order,dist,mp_q):
         for i in range(bdry_points.shape[0]):
             green[i], _ = dblquad(coil_green,cx1-cdx/2,cx1+cdx/2,cy1-cdy/2,cy1+cdy/2,args=(bdry_points[i,0],bdry_points[i,1]))
         return green, psi_bdry
+    def analytic_mutual():
+        def mutual_integrand(z,r):
+            integrand, _ = dblquad(coil_green,cx1-cdx/2,cx1+cdx/2,cy1-cdy/2,cy1+cdy/2,args=(r,z))
+            return integrand
+        mutual, _ = dblquad(mutual_integrand,cx2-cdx/2,cx2+cdx/2,cy2-cdy/2,cy2+cdy/2)
+        return mutual*2.0*np.pi/(cdx*cdy)/(cdx*cdy)
     # Build mesh
     gs_mesh = gs_Domain(rextent=1.0,zextents=[0.0,1.0])
     gs_mesh.define_region('air',mesh_resolution,'boundary')
     gs_mesh.define_region('plasma',mesh_resolution,'plasma')
-    gs_mesh.define_region('coil',0.01,'coil')
+    gs_mesh.define_region('coil1',0.01,'coil')
+    gs_mesh.define_region('coil2',mesh_resolution,'coil')
     gs_mesh.add_rectangle(px1,py1,pdx,pdy,'plasma')
-    gs_mesh.add_rectangle(cx1,cy1,cdx,cdy,'coil')
+    gs_mesh.add_rectangle(cx1,cy1,cdx,cdy,'coil1')
+    gs_mesh.add_rectangle(cx2,cy2,cdx,cdy,'coil2')
     mesh_pts, mesh_lc, mesh_reg = gs_mesh.build_mesh()
     coil_dict = gs_mesh.get_coils()
     cond_dict = gs_mesh.get_conductors()
@@ -362,14 +371,18 @@ def run_coil_case(mesh_resolution,fe_order,dist,mp_q):
     mygs.setup_mesh(mesh_pts,mesh_lc,mesh_reg)
     mygs.setup_regions(cond_dict=cond_dict,coil_dict=coil_dict)
     mygs.setup(order=fe_order)
-    mygs.set_coil_currents({'COIL': cdx*cdy})
+    mygs.set_coil_currents({'COIL1': cdx*cdy})
     if dist is not None:
-        mygs.set_coil_current_dist('COIL',dist(mygs.r[:,0],mygs.r[:,1]))
+        mygs.set_coil_current_dist('COIL1',dist(mygs.r[:,0],mygs.r[:,1]))
     try:
         psi0 = mygs.vac_solve()
     except ValueError:
         mp_q.put(None)
         return
+    # Get coil mutual matrix
+    Lmat = mygs.get_coil_Lmat()
+    Mcc = analytic_mutual()
+    mutual_err = abs((Lmat[0,1]+Mcc)/Mcc)
 
     # Get analytic result
     green1, psi1 = masked_err(mygs.r[:,1]==1.0,mygs,psi0,0)
@@ -379,19 +392,24 @@ def run_coil_case(mesh_resolution,fe_order,dist,mp_q):
     green_full = np.hstack((green1[1:], green2, green3[1:]))
     psi_full = np.hstack((psi1[1:], psi2, psi3[1:]))
     psi_err = np.linalg.norm(green_full+psi_full)/np.linalg.norm(green_full)
-    mp_q.put([psi_err])
+    mp_q.put([psi_err,mutual_err])
     oftpy_dump_cov()
 
 
-def validate_coil(results,psi_err_exp):
+def validate_coil(results,psi_err_exp,mutual_err_exp):
     if results is None:
         print("FAILED: error in solve!")
         return False
     test_result = True
-    if abs(results[0]) > abs(psi_err_exp)*1.1:
+    if abs(results[0]) > 1.1*abs(psi_err_exp):
         print("FAILED: psi error too high!")
-        print("  Expected = {0}".format(psi_err_exp))
-        print("  Actual =   {0}".format(results[0]))
+        print("  Expected = {0:.5E}".format(psi_err_exp))
+        print("  Actual =   {0:.5E}".format(results[0]))
+        test_result = False
+    if abs(results[1]) > 1.1*abs(mutual_err_exp):
+        print("FAILED: coil mutual error too high!")
+        print("  Expected = {0:.5E}".format(mutual_err_exp))
+        print("  Actual =   {0:.5E}".format(results[1]))
         test_result = False
     return test_result
 
@@ -405,34 +423,39 @@ def coil_dist(r,z):
 @pytest.mark.parametrize("dist_coil", (False, True))
 def test_coil_h1(order,dist_coil):
     if dist_coil:
-        errs = np.r_[0.01840042334178343, 0.003450061648683903, 0.0008471927795560409]
+        errs = np.r_[2.34993E-02, 7.68143E-03, 7.54414E-04]
+        mutual_errs = np.r_[9.88100E-03, 5.16977E-03, 3.54599E-04]
         results = mp_run(run_coil_case,(0.1,order,coil_dist))
     else:
-        errs = np.r_[0.010702389576304984, 0.00028240755964702516, 1.7930442330763583e-05]
+        errs = np.r_[9.62847E-03, 7.45252E-04, 4.29408E-05]
+        mutual_errs = np.r_[1.01747E-03, 3.92000E-04, 5.27038E-05]
         results = mp_run(run_coil_case,(0.1,order,None))
-    print('Err = ',results[0])
-    assert validate_coil(results,errs[order-2])
+    assert validate_coil(results,errs[order-2],mutual_errs[order-2])
 @pytest.mark.parametrize("order", (2,3,4))
 @pytest.mark.parametrize("dist_coil", (False, True))
 def test_coil_h2(order,dist_coil):
     if dist_coil:
-        errs = np.r_[0.0036698088466649878, 0.00021755100020083888, 1.736479174843997e-05]
+        errs = np.r_[4.32354E-03, 2.15974E-04, 1.97917E-05]
+        mutual_errs = np.r_[4.54609E-04, 1.25920E-04, 4.84935E-06]
         results = mp_run(run_coil_case,(0.1/2.0,order,coil_dist))
     else:
-        errs = np.r_[0.0032680822197860876, 2.7032824967342426e-05, 8.560758830069598e-07]
+        errs = np.r_[3.70634E-03, 5.16587E-05, 3.55922E-06]
+        mutual_errs = np.r_[1.14499E-03, 2.03449E-05, 1.49148E-06]
         results = mp_run(run_coil_case,(0.1/2.0,order,None))
-    assert validate_coil(results,errs[order-2])
+    assert validate_coil(results,errs[order-2],mutual_errs[order-2])
 @pytest.mark.slow
 @pytest.mark.parametrize("order", (2,3,4))
 @pytest.mark.parametrize("dist_coil", (False, True))
 def test_coil_h3(order,dist_coil):
     if dist_coil:
-        errs = np.r_[0.001364423661608862, 1.5953386454257285e-05, 9.158565258919996e-07]
+        errs = np.r_[1.30686E-03, 1.00862E-05, 4.33982E-07]
+        mutual_errs = np.r_[4.30803E-04, 3.04001E-06, 1.69941E-07]
         results = mp_run(run_coil_case,(0.1/4.0,order,coil_dist))
     else:
-        errs = np.r_[0.0008094155097004184, 1.8949323808351823e-06, 4.4169705023586007e-07]
+        errs = np.r_[9.12771E-04, 1.58232E-06, 3.04067E-07]
+        mutual_errs = np.r_[3.31022E-04, 2.88318E-07, 2.19675E-07]
         results = mp_run(run_coil_case,(0.1/4.0,order,None))
-    assert validate_coil(results,errs[order-2])
+    assert validate_coil(results,errs[order-2],mutual_errs[order-2])
 
 
 #============================================================================
@@ -879,6 +902,427 @@ LTX_eq_dict = {
 def test_LTX_eq(order):
     results = mp_run(run_LTX_case,(order,False,False))
     assert validate_dict(results,LTX_eq_dict)
+
+#============================================================================
+# Bootstrap current test (ITER-based)
+#============================================================================
+def run_ITER_bootstrap_case(mesh_resolution, fe_order, mp_q):
+    from OpenFUSIONToolkit.TokaMaker.bootstrap import solve_with_bootstrap, Hmode_profiles
+
+    # --- Mesh creation (identical to run_ITER_case) ---
+    def create_mesh():
+        with open('ITER_geom.json','r') as fid:
+            ITER_geom = json.load(fid)
+        plasma_dx = 0.15/mesh_resolution
+        coil_dx = 0.2/mesh_resolution
+        vv_dx = 0.3/mesh_resolution
+        vac_dx = 0.6/mesh_resolution
+        gs_mesh = gs_Domain()
+        gs_mesh.define_region('air',vac_dx,'boundary')
+        gs_mesh.define_region('plasma',plasma_dx,'plasma')
+        gs_mesh.define_region('vacuum1',vv_dx,'vacuum')
+        gs_mesh.define_region('vacuum2',vv_dx,'vacuum')
+        gs_mesh.define_region('vv1',vv_dx,'conductor',eta=6.9E-7)
+        gs_mesh.define_region('vv2',vv_dx,'conductor',eta=6.9E-7)
+        for key, coil in ITER_geom['coils'].items():
+            if not key.startswith('VS'):
+                gs_mesh.define_region(key,coil_dx,'coil')
+        gs_mesh.define_region('VSU',coil_dx,'coil',coil_set='VS',nTurns=1.0)
+        gs_mesh.define_region('VSL',coil_dx,'coil',coil_set='VS',nTurns=-1.0)
+        gs_mesh.add_polygon(ITER_geom['limiter'],'plasma',parent_name='vacuum1')
+        gs_mesh.add_annulus(ITER_geom['inner_vv'][0],'vacuum1',ITER_geom['inner_vv'][1],'vv1',parent_name='vacuum2')
+        gs_mesh.add_annulus(ITER_geom['outer_vv'][0],'vacuum2',ITER_geom['outer_vv'][1],'vv2',parent_name='air')
+        for key, coil in ITER_geom['coils'].items():
+            if key.startswith('VS'):
+                gs_mesh.add_rectangle(coil['rc'],coil['zc'],coil['w'],coil['h'],key,parent_name='vacuum1')
+            else:
+                gs_mesh.add_rectangle(coil['rc'],coil['zc'],coil['w'],coil['h'],key,parent_name='air')
+        mesh_pts, mesh_lc, mesh_reg = gs_mesh.build_mesh()
+        coil_dict = gs_mesh.get_coils()
+        cond_dict = gs_mesh.get_conductors()
+        save_gs_mesh(mesh_pts,mesh_lc,mesh_reg,coil_dict,cond_dict,'ITER_mesh.h5')
+
+    if not os.path.exists('ITER_mesh.h5'):
+        try:
+            create_mesh()
+        except Exception as e:
+            print(e)
+            mp_q.put(None)
+            return
+
+    # --- Set up GS solver (same as run_ITER_case) ---
+    myOFT = OFT_env(nthreads=-1)
+    mygs = TokaMaker(myOFT)
+    mesh_pts, mesh_lc, mesh_reg, coil_dict, cond_dict = load_gs_mesh('ITER_mesh.h5')
+    mygs.setup_mesh(mesh_pts, mesh_lc, mesh_reg)
+    mygs.setup_regions(cond_dict=cond_dict, coil_dict=coil_dict)
+    mygs.setup(order=fe_order, F0=5.3*6.2)
+
+    mygs.set_coil_vsc({'VS': 1.0})
+    coil_bounds = {key: [-50.E6, 50.E6] for key in mygs.coil_sets}
+    mygs.set_coil_bounds(coil_bounds)
+
+    Ip_target = 15.6E6
+    P0_target = 6.2E5
+    mygs.set_targets(Ip=Ip_target, pax=P0_target)
+
+    isoflux_pts = np.array([
+        [ 8.20,  0.41],
+        [ 8.06,  1.46],
+        [ 7.51,  2.62],
+        [ 6.14,  3.78],
+        [ 4.51,  3.02],
+        [ 4.26,  1.33],
+        [ 4.28,  0.08],
+        [ 4.49, -1.34],
+        [ 7.28, -1.89],
+        [ 8.00, -0.68]
+    ])
+    x_point = np.array([[5.125, -3.4],])
+    mygs.set_isoflux(np.vstack((isoflux_pts, x_point)))
+    mygs.set_saddles(x_point)
+
+    regularization_terms = []
+    for name in mygs.coil_sets:
+        if name.startswith('CS'):
+            if name.startswith('CS1'):
+                regularization_terms.append(mygs.coil_reg_term({name: 1.0}, target=0.0, weight=2.E-2))
+            else:
+                regularization_terms.append(mygs.coil_reg_term({name: 1.0}, target=0.0, weight=1.E-2))
+        elif name.startswith('PF'):
+            regularization_terms.append(mygs.coil_reg_term({name: 1.0}, target=0.0, weight=1.E-2))
+        elif name.startswith('VS'):
+            regularization_terms.append(mygs.coil_reg_term({name: 1.0}, target=0.0, weight=1.E-2))
+    regularization_terms.append(mygs.coil_reg_term({'#VSC': 1.0}, target=0.0, weight=1.E2))
+    mygs.set_coil_reg(reg_terms=regularization_terms)
+
+    ffp_prof = create_power_flux_fun(40, 1.5, 2.0)
+    pp_prof = create_power_flux_fun(40, 4.0, 1.0)
+    mygs.set_profiles(ffp_prof=ffp_prof, pp_prof=pp_prof)
+
+    R0 = 6.3
+    Z0 = 0.5
+    a = 2.0
+    kappa = 1.4
+    delta = 0.0
+    try:
+        mygs.init_psi(R0, Z0, a, kappa, delta)
+        mygs.solve()
+    except ValueError:
+        mp_q.put(None)
+        return
+
+    # --- Define kinetic and current profiles for bootstrap solve ---
+    n_sample = 257
+    psi_sample = np.linspace(0.0, 1.0, n_sample)
+    psi_pad = 1.E-3
+
+    # Inductive j_phi profile shape
+    jphi_prof = create_power_flux_fun(len(psi_sample), 2.25, 2.5)
+    inductive_jphi = jphi_prof['y']
+
+    # H-mode kinetic profiles
+    xphalf = 0.965
+    widthp_Te = 0.1
+    widthp_ne = 0.35
+
+    ne = Hmode_profiles(edge=0.35, ped=0.6, core=1.1, rgrid=n_sample,
+                        expin=1.6, expout=1.6, widthp=widthp_ne, xphalf=xphalf) * 1e20
+    Te = Hmode_profiles(edge=1500., ped=5000., core=21000., rgrid=n_sample,
+                        expin=1.3, expout=1.7, widthp=widthp_Te, xphalf=xphalf)
+    ni = ne.copy()       # Assuming quasineutrality
+    Ti = Te.copy()       # Assuming isothermal
+    Zeff = np.full(n_sample, 1.7)
+
+    # --- Solve with bootstrap current ---
+    try:
+        bs_results = solve_with_bootstrap(
+            mygs,
+            ne, Te, ni, Ti, Zeff,
+            Ip_target,
+            inductive_jphi,
+            scale_jBS=1.0,
+            isolate_edge_jBS=False,
+            psi_pad=psi_pad,
+            iterations=2,
+            diagnostic_plots=False
+        )
+    except Exception as e:
+        print("Bootstrap solve failed: {0}".format(e))
+        mp_q.put(None)
+        return
+
+    # --- Collect results ---
+    eq_info = mygs.get_stats(li_normalization='ITER')
+
+    # Bootstrap-specific diagnostics
+    j_BS = bs_results['j_BS']
+    j_total = bs_results['total_j_phi']
+    j_ind = bs_results['j_inductive']
+
+    eq_info['j_BS_max'] = float(np.max(np.abs(j_BS)))
+    eq_info['j_BS_axis'] = float(j_BS[0])
+    eq_info['jphi_axis'] = float(j_total[0])
+    eq_info['jphi_max'] = float(np.max(np.abs(j_total)))
+    eq_info['j_ind_axis'] = float(j_ind[0])
+
+    # Bootstrap fraction (psi-space trapezoid estimate)
+    bs_frac = np.trapezoid(j_BS, psi_sample) / np.trapezoid(j_total, psi_sample) \
+              if np.trapezoid(j_total, psi_sample) != 0 else 0.0
+    eq_info['bs_fraction'] = float(bs_frac)
+
+    mp_q.put([eq_info])
+    oftpy_dump_cov()
+
+# -----------------------------------------------------------------------
+# Expected values dictionary
+# -----------------------------------------------------------------------
+ITER_bootstrap_eq_dict = {
+    'Ip': 15600817.585821694,
+    'kappa': 1.87554142781964,
+    'R_geo': 6.222376807932244,
+    'a_geo': 1.9817209643036526,
+    'q_0': 0.9951304914765554,
+    'q_95': 2.856235920791585,
+    'P_ax': 739971.7132708698,
+    'j_BS_max': 193963.2797949608,
+    'j_BS_axis': 7555.958566625245,
+    'jphi_axis': 1459409.3677809385,
+    'jphi_max': 1551188.1280449552,
+    'j_ind_axis': 1357487.1677957429,
+    'bs_fraction': 0.1575907471180497,
+}
+
+@pytest.mark.slow
+@pytest.mark.parametrize("order", (2,))
+def test_ITER_bootstrap(order):
+    results = mp_run(run_ITER_bootstrap_case, (1.0, order), timeout=300)
+    assert validate_dict(results, ITER_bootstrap_eq_dict)
+
+
+# -----------------------------------------------------------------------
+# Test: redl_bootstrap() directly (same equilibrium as test_ITER_bootstrap)
+# -----------------------------------------------------------------------
+def run_Redl_jBS_case(mesh_resolution, fe_order, mp_q):
+    from OpenFUSIONToolkit.TokaMaker.bootstrap import (
+        redl_bootstrap, calculate_ln_lambda, Hmode_profiles
+    )
+
+    # --- Mesh creation (identical to run_ITER_bootstrap_case) ---
+    def create_mesh():
+        with open('ITER_geom.json','r') as fid:
+            ITER_geom = json.load(fid)
+        plasma_dx = 0.15/mesh_resolution
+        coil_dx = 0.2/mesh_resolution
+        vv_dx = 0.3/mesh_resolution
+        vac_dx = 0.6/mesh_resolution
+        gs_mesh = gs_Domain()
+        gs_mesh.define_region('air',vac_dx,'boundary')
+        gs_mesh.define_region('plasma',plasma_dx,'plasma')
+        gs_mesh.define_region('vacuum1',vv_dx,'vacuum')
+        gs_mesh.define_region('vacuum2',vv_dx,'vacuum')
+        gs_mesh.define_region('vv1',vv_dx,'conductor',eta=6.9E-7)
+        gs_mesh.define_region('vv2',vv_dx,'conductor',eta=6.9E-7)
+        for key, coil in ITER_geom['coils'].items():
+            if not key.startswith('VS'):
+                gs_mesh.define_region(key,coil_dx,'coil')
+        gs_mesh.define_region('VSU',coil_dx,'coil',coil_set='VS',nTurns=1.0)
+        gs_mesh.define_region('VSL',coil_dx,'coil',coil_set='VS',nTurns=-1.0)
+        gs_mesh.add_polygon(ITER_geom['limiter'],'plasma',parent_name='vacuum1')
+        gs_mesh.add_annulus(ITER_geom['inner_vv'][0],'vacuum1',ITER_geom['inner_vv'][1],'vv1',parent_name='vacuum2')
+        gs_mesh.add_annulus(ITER_geom['outer_vv'][0],'vacuum2',ITER_geom['outer_vv'][1],'vv2',parent_name='air')
+        for key, coil in ITER_geom['coils'].items():
+            if key.startswith('VS'):
+                gs_mesh.add_rectangle(coil['rc'],coil['zc'],coil['w'],coil['h'],key,parent_name='vacuum1')
+            else:
+                gs_mesh.add_rectangle(coil['rc'],coil['zc'],coil['w'],coil['h'],key,parent_name='air')
+        mesh_pts, mesh_lc, mesh_reg = gs_mesh.build_mesh()
+        coil_dict = gs_mesh.get_coils()
+        cond_dict = gs_mesh.get_conductors()
+        save_gs_mesh(mesh_pts,mesh_lc,mesh_reg,coil_dict,cond_dict,'ITER_mesh.h5')
+
+    if not os.path.exists('ITER_mesh.h5'):
+        try:
+            create_mesh()
+        except Exception as e:
+            print(e)
+            mp_q.put(None)
+            return
+
+    # --- Set up GS solver (same as run_ITER_bootstrap_case) ---
+    myOFT = OFT_env(nthreads=-1)
+    mygs = TokaMaker(myOFT)
+    mesh_pts, mesh_lc, mesh_reg, coil_dict, cond_dict = load_gs_mesh('ITER_mesh.h5')
+    mygs.setup_mesh(mesh_pts, mesh_lc, mesh_reg)
+    mygs.setup_regions(cond_dict=cond_dict, coil_dict=coil_dict)
+    mygs.setup(order=fe_order, F0=5.3*6.2)
+
+    mygs.set_coil_vsc({'VS': 1.0})
+    coil_bounds = {key: [-50.E6, 50.E6] for key in mygs.coil_sets}
+    mygs.set_coil_bounds(coil_bounds)
+
+    Ip_target = 15.6E6
+    P0_target = 6.2E5
+    mygs.set_targets(Ip=Ip_target, pax=P0_target)
+
+    isoflux_pts = np.array([
+        [ 8.20,  0.41],
+        [ 8.06,  1.46],
+        [ 7.51,  2.62],
+        [ 6.14,  3.78],
+        [ 4.51,  3.02],
+        [ 4.26,  1.33],
+        [ 4.28,  0.08],
+        [ 4.49, -1.34],
+        [ 7.28, -1.89],
+        [ 8.00, -0.68]
+    ])
+    x_point = np.array([[5.125, -3.4],])
+    mygs.set_isoflux(np.vstack((isoflux_pts, x_point)))
+    mygs.set_saddles(x_point)
+
+    regularization_terms = []
+    for name in mygs.coil_sets:
+        if name.startswith('CS'):
+            if name.startswith('CS1'):
+                regularization_terms.append(mygs.coil_reg_term({name: 1.0}, target=0.0, weight=2.E-2))
+            else:
+                regularization_terms.append(mygs.coil_reg_term({name: 1.0}, target=0.0, weight=1.E-2))
+        elif name.startswith('PF'):
+            regularization_terms.append(mygs.coil_reg_term({name: 1.0}, target=0.0, weight=1.E-2))
+        elif name.startswith('VS'):
+            regularization_terms.append(mygs.coil_reg_term({name: 1.0}, target=0.0, weight=1.E-2))
+    regularization_terms.append(mygs.coil_reg_term({'#VSC': 1.0}, target=0.0, weight=1.E2))
+    mygs.set_coil_reg(reg_terms=regularization_terms)
+
+    ffp_prof = create_power_flux_fun(40, 1.5, 2.0)
+    pp_prof = create_power_flux_fun(40, 4.0, 1.0)
+    mygs.set_profiles(ffp_prof=ffp_prof, pp_prof=pp_prof)
+
+    R0 = 6.3
+    Z0 = 0.5
+    a = 2.0
+    kappa = 1.4
+    delta = 0.0
+    try:
+        mygs.init_psi(R0, Z0, a, kappa, delta)
+        mygs.solve()
+    except ValueError:
+        mp_q.put(None)
+        return
+
+    # --- Define kinetic profiles (same as run_ITER_bootstrap_case) ---
+    EC = 1.602176634e-19
+    n_psi = 257
+    psi_N = np.linspace(0.0, 1.0, n_psi)
+    psi_pad = 1.E-3
+
+    xphalf = 0.965
+    widthp_Te = 0.1
+    widthp_ne = 0.35
+
+    ne = Hmode_profiles(edge=0.35, ped=0.6, core=1.1, rgrid=n_psi,
+                        expin=1.6, expout=1.6, widthp=widthp_ne, xphalf=xphalf) * 1e20
+    Te = Hmode_profiles(edge=1500., ped=5000., core=21000., rgrid=n_psi,
+                        expin=1.3, expout=1.7, widthp=widthp_Te, xphalf=xphalf)
+    ni = ne.copy()
+    Ti = Te.copy()
+    Zeff = np.full(n_psi, 1.7)
+
+    pressure = (EC * ne * Te) + (EC * ni * Ti)
+
+    # --- Extract geometry from equilibrium (same as solve_with_bootstrap) ---
+    _, f, _, _, _ = mygs.get_profiles(npsi=n_psi, psi_pad=psi_pad)
+    _, fc, r_avgs, _ = mygs.sauter_fc(npsi=n_psi, psi_pad=psi_pad)
+
+    ft = 1 - fc
+    eps = r_avgs[2] / r_avgs[0]
+    _, qvals, ravgs_q, _, _, _ = mygs.get_q(npsi=n_psi, psi_pad=psi_pad)
+    R_avg = ravgs_q[0]
+
+    # --- Gradients (same as solve_with_bootstrap) ---
+    psi_range = mygs.psi_bounds[1] - mygs.psi_bounds[0]
+    d_psi = np.gradient(psi_N)
+    d_psi_eff = d_psi * psi_range
+    d_psi_eff[d_psi_eff == 0] = 1e-9
+
+    dn_e_dpsi = np.gradient(ne) / d_psi_eff
+    dT_e_dpsi = np.gradient(Te) / d_psi_eff
+    dn_i_dpsi = np.gradient(ni) / d_psi_eff
+    dT_i_dpsi = np.gradient(Ti) / d_psi_eff
+
+    # --- Coulomb logarithms (same as solve_with_bootstrap) ---
+    ln_le, ln_lii = calculate_ln_lambda(
+        Te, Ti, ne, ni, Zeff,
+        electron_lnLambda_model='NRL',
+        ion_lnLambda_model='Zavg',
+    )
+
+    # --- Collisionalities (same as solve_with_bootstrap) ---
+    Zdom = 1.0
+    Zavg = ne / ni
+    Zion = (Zdom**2 * Zavg * Zeff)**0.25
+    nu_i_star = (4.90e-18 * np.abs(qvals) * R_avg * ni
+                 * Zion**4 * ln_lii / (Ti**2 * eps**1.5))
+    nu_e_star = (6.921e-18 * np.abs(qvals) * R_avg * ne
+                 * Zeff * ln_le / (Te**2 * eps**1.5))
+
+    # --- Call redl_bootstrap (same as solve_with_bootstrap) ---
+    try:
+        j_BS_neo, coeffs = redl_bootstrap(
+            psi_N=psi_N, Te=Te, Ti=Ti, ne=ne, ni=ni,
+            pe=EC*(ne*Te), pi=EC*(ni*Ti),
+            Zeff=Zeff, R=R_avg, q=qvals, eps=eps, fT=ft, I_psi=f,
+            dT_e_dpsi=dT_e_dpsi, dT_i_dpsi=dT_i_dpsi,
+            dn_e_dpsi=dn_e_dpsi, dn_i_dpsi=dn_i_dpsi,
+            ln_lambda_e=ln_le, ln_lambda_ii=ln_lii,
+            nu_e_star_override=nu_e_star,
+            nu_i_star_override=nu_i_star,
+            use_legacy_L34=False,
+            use_sign_q=True,
+            formula_form='jboot1',
+        )
+    except Exception as e:
+        print("redl_bootstrap failed: {0}".format(e))
+        mp_q.put(None)
+        return
+
+    # Convert to j_phi (A/m^2) same as solve_with_bootstrap
+    j_BS = j_BS_neo * (R_avg / f)
+    j_BS = np.nan_to_num(j_BS, nan=0.0)
+
+    # --- Collect results ---
+    results = {}
+    results['j_BS_max'] = float(np.max(np.abs(j_BS)))
+    results['j_BS_axis'] = float(j_BS[0])
+    results['j_BS_edge'] = float(j_BS[-1])
+    results['L31_axis'] = float(coeffs['L31'][0])
+    results['L32_axis'] = float(coeffs['L32'][0])
+    results['alpha_axis'] = float(coeffs['alpha'][0])
+    results['nu_e_star_axis'] = float(coeffs['nu_e_star'][0])
+    results['nu_i_star_axis'] = float(coeffs['nu_i_star'][0])
+
+    mp_q.put([results])
+    oftpy_dump_cov()
+
+
+Redl_jBS_eq_dict = {
+    'j_BS_max': 186871.6671880487,
+    'j_BS_axis': 6884.411685375865,
+    'j_BS_edge': 99805.65713701912,
+    'L31_axis': 0.11407690451043999,
+    'L32_axis': -0.02350066144455873,
+    'alpha_axis': -0.6540121192349444,
+    'nu_e_star_axis': 0.2522534932532852,
+    'nu_i_star_axis': 0.2194433170749313,
+}
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("order", (2,))
+def test_Redl_jBS(order):
+    results = mp_run(run_Redl_jBS_case, (1.0, order), timeout=300)
+    assert validate_dict(results, Redl_jBS_eq_dict)
 
 # # Example of how to run single test without pytest
 # if __name__ == '__main__':

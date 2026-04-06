@@ -69,8 +69,6 @@ def fetch_file(url, file, headers={'User-Agent' : "Magic Browser"}):
             file_size = -1
     except ValueError as e:
         error_exit('Invalid download URL: "{0}"'.format(original_url), exception=e)
-    except Exception as e:
-        error_exit('Download failed for file: "{0}"'.format(original_url), exception=e)
     else:
         line = "  Downloading: {0}".format(original_url)
         print(line)
@@ -248,9 +246,9 @@ def setup_build_env(build_dir="build", build_cmake_ver=None):
                 line = result.split("\n")[0]
                 ver_string = line.split("version")[1]
                 ver_string = ver_string.split("-")[0]  # Needed if patch release
-                if ver_lt(ver_string,"3.12"):
+                if ver_lt(ver_string,"3.27"):
                     config_dict['CMAKE'] = None
-                    cmake_err_string = "specified CMAKE version < 3.12"
+                    cmake_err_string = "specified CMAKE version < 3.27"
                 else:
                     config_dict['CMAKE_VERSION'] = ver_string
             except:
@@ -354,6 +352,7 @@ def build_cmake_script(mydict,build_debug=False,use_openmp=False,build_python=Fa
         "-DCMAKE_BUILD_TYPE={0}".format("Debug" if build_debug else "Release"),
         "-DCMAKE_INSTALL_PREFIX:PATH=$INSTALL_DIR",
         "-DOFT_BUILD_TESTS:BOOL={0}".format(bool_to_string(build_tests)),
+        "-DOFT_PY_KERNEL:STRING={0}".format(mydict.get('OFT_PY_KERNEL', 'python3')),
         "-DOFT_BUILD_EXAMPLES:BOOL={0}".format(bool_to_string(build_examples)),
         "-DOFT_BUILD_PYTHON:BOOL={0}".format(bool_to_string(build_python)),
         "-DOFT_BUILD_DOCS:BOOL={0}".format(bool_to_string(build_docs)),
@@ -363,6 +362,8 @@ def build_cmake_script(mydict,build_debug=False,use_openmp=False,build_python=Fa
         "-DOFT_COVERAGE:BOOL={0}".format(bool_to_string(build_coverage)),
         "-DOFT_DEBUG_STACK:BOOL={0}".format(bool_to_string(enable_debug_stack)),
         "-DOFT_PROFILING:BOOL={0}".format(bool_to_string(enable_profiling)),
+        "-DOFT_TOKAMAKER_LEGACY:BOOL=FALSE",
+        "-DOFT_THINCURR_LEGACY:BOOL=FALSE",
         "-DCMAKE_C_COMPILER:FILEPATH={CC}",
         "-DCMAKE_CXX_COMPILER:FILEPATH={CXX}",
         "-DCMAKE_Fortran_COMPILER:FILEPATH={FC}"
@@ -370,6 +371,8 @@ def build_cmake_script(mydict,build_debug=False,use_openmp=False,build_python=Fa
     if 'MACOS_SDK_PATH' in tmp_dict:
         env_lines.append('export SYSROOT={0}'.format(tmp_dict['MACOS_SDK_PATH']))
         cmake_lines.append('-DCMAKE_OSX_SYSROOT={0}'.format(tmp_dict['MACOS_SDK_PATH']))
+    if 'MACOSX_DEPLOYMENT_TARGET' in tmp_dict:
+        env_lines.append('export MACOSX_DEPLOYMENT_TARGET={0}'.format(tmp_dict['MACOSX_DEPLOYMENT_TARGET']))
     if mydict['BASE_CFLAGS'] != '':
         cmake_lines.append('-DCMAKE_C_FLAGS:STRING="{BASE_CFLAGS}"')
     if mydict['BASE_FFLAGS'] != '':
@@ -391,8 +394,7 @@ def build_cmake_script(mydict,build_debug=False,use_openmp=False,build_python=Fa
         if "MPI_FC" in mydict:
             cmake_lines.append("-DMPI_Fortran_COMPILER:PATH={0}".format(mydict["MPI_FC"]))
     if have_mpi:
-        if mydict.get("MPI_USE_HEADERS",False):
-            cmake_lines.append("-DOFT_MPI_HEADER:BOOL=TRUE")
+        cmake_lines.append("-DOFT_MPI_HEADER:BOOL={0}".format(bool_to_string(mydict.get("MPI_USE_HEADERS",False))))
     else:
         cmake_lines.append("-DOFT_USE_MPI:BOOL=FALSE")
     if "PETSC_ROOT" in mydict:
@@ -414,8 +416,8 @@ def build_cmake_script(mydict,build_debug=False,use_openmp=False,build_python=Fa
         cmake_lines.append("-DBLA_VENDOR:STRING={0}".format(mydict["BLAS_VENDOR"]))
     if "ARPACK_ROOT" in mydict:
         cmake_lines.append("-DOFT_ARPACK_ROOT:PATH={0}".format(mydict["ARPACK_ROOT"]))
-    if "FOX_ROOT" in mydict:
-        cmake_lines.append("-DOFT_FoX_ROOT:PATH={0}".format(mydict["FOX_ROOT"]))
+    if "LIBXML2_ROOT" in mydict:
+        cmake_lines.append("-DLIBXML2_ROOT:PATH={0}".format(mydict["LIBXML2_ROOT"]))
     if "ONURBS_ROOT" in mydict:
         cmake_lines.append("-DOFT_OpenNURBS_ROOT:PATH={0}".format(mydict["ONURBS_ROOT"]))
     if "PETSC_ROOT" in mydict:
@@ -644,6 +646,8 @@ class package:
         addl_envs = {}
         if 'MACOS_SDK_PATH' in config_dict:
             addl_envs['SDKROOT'] = self.config_dict['MACOS_SDK_PATH']
+        if 'MACOSX_DEPLOYMENT_TARGET' in config_dict:
+            addl_envs['MACOSX_DEPLOYMENT_TARGET'] = self.config_dict['MACOSX_DEPLOYMENT_TARGET']
         result, _ = run_command("bash build_tmp.sh", timeout=self.build_timeout*60, env_vars=addl_envs)
         with open("build_tmp.log", "w+") as fid:
             fid.write(result)
@@ -1276,6 +1280,7 @@ class OpenBLAS(package):
         self.dynamic_arch = dynamic_arch
         self.no_avx = no_avx
         self.shared_libs = shared_libs
+        self.build_timeout = 30
 
     def setup(self, config_dict):
         self.config_dict = config_dict.copy()
@@ -1779,37 +1784,50 @@ class UMFPACK(package):
         self.run_build(build_lines, self.config_dict)
 
 
-class FOX(package):
-    def __init__(self):
-        self.name = "FOX"
-        self.url = "https://github.com/andreww/fox/archive/refs/tags/4.1.2.tar.gz"
-        self.build_dir = "fox-4.1.2"
+class LIBXML2(package):
+    def __init__(self, static_libs=True):
+        self.name = "LIBXML2"
+        self.url = "https://gitlab.gnome.org/GNOME/libxml2/-/archive/v2.15.2/libxml2-v2.15.2.tar.gz"
+        self.static_libs = static_libs
 
     def setup(self, config_dict):
         self.config_dict = config_dict.copy()
         self.setup_root_struct()
         install_path = os.path.join(self.root_path, self.install_dir)
-        self.config_dict["FOX_INCLUDE"] = os.path.join(install_path, "finclude")
-        self.config_dict["FOX_LIBS"] = "-lFoX_dom -lFoX_sax -lFoX_fsys -lFoX_utils -lFoX_common"
-        self.config_dict['CROSS_COMPILE_FLAG'] = ""
-        if 'CROSS_COMPILE_HOST' in config_dict:
-            self.config_dict['CROSS_COMPILE_FLAG'] = '--host="{0}"'.format(config_dict['CROSS_COMPILE_HOST'])
-        # Installation check files
-        self.install_chk_files = [os.path.join(self.config_dict['FOX_LIB'], 'libFoX_dom.a')]
+        self.config_dict["LIBXML2_INCLUDE"] = os.path.join(install_path, "include")
+        self.config_dict["LIBXML2_LIBS"] = "-lxml2"
+        # # Installation check files
+        # if self.static_libs:
+        #     self.install_chk_files = [os.path.join(self.config_dict['LIBXML2_LIB'], 'libxml2.a')]
+        # else:
+        #     self.install_chk_files = [os.path.join(self.config_dict['LIBXML2_LIB'], 'libxml2'+self.config_dict['DYN_EXT'])]
         #
         return self.config_dict
 
     def build(self):
         build_lines = [
-            "make distclean",
-            "export CC={CC}",
-            "export FC={FC}",
-            "export CFLAGS=-fPIC",
-            "export FCFLAGS=-fPIC"]
-        if config_dict['OS_TYPE'] == 'Darwin': # Prevent configuration error with GCC
-            build_lines.append("export GFORTRAN_UNBUFFERED_ALL=Y")
+            "rm -rf build",
+            "mkdir build",
+            "cd build",
+            "export CC={CC}"
+        ]
+        cmake_options = [
+            '-DCMAKE_INSTALL_PREFIX:PATH={LIBXML2_ROOT}',
+            '-DCMAKE_POSITION_INDEPENDENT_CODE:BOOL=ON',
+            '-DLIBXML2_WITH_PROGRAMS:BOOL=OFF',
+            '-DLIBXML2_WITH_TESTS:BOOL=OFF',
+            '-DLIBXML2_WITH_ICONV:BOOL=OFF'
+        ]
+        if self.static_libs:
+            cmake_options += [
+                '-DBUILD_SHARED_LIBS:BOOL=OFF'
+            ]
+        else:
+            cmake_options += [
+                '-DBUILD_SHARED_LIBS:BOOL=ON'
+            ]
         build_lines += [
-            "./configure --prefix={FOX_ROOT} --enable-dom {CROSS_COMPILE_FLAG}",
+            "{CMAKE} " + " ".join(cmake_options) + " ..",
             "make -j{MAKE_THREADS}",
             "make install"
         ]
@@ -1853,7 +1871,7 @@ class ONURBS(package):
 
 class PETSC(package):
     def __init__(self, debug=False, with_openmp=False, with_superlu=False, with_superlu_dist=False, with_umfpack=False,
-                 with_mumps=False, version="3.23", comp_wrapper=False, shared_libs=None):
+                 with_mumps=False, version="3.23", comp_wrapper=False, shared_libs=None, mpi_f08=True):
         self.name = "PETSC"
         self.display_name = "PETSc"
         self.version = version
@@ -1877,6 +1895,7 @@ class PETSC(package):
         self.with_mumps = with_mumps
         self.comp_wrapper = comp_wrapper
         self.shared_libs = shared_libs
+        self.mpi_f08 = mpi_f08
 
     def detect_version(self):
         print("  Testing PETSc version")
@@ -1952,20 +1971,16 @@ class PETSC(package):
             error_exit('CMAKE >= 4.0 not presently supported with PETSc', ('Update or retry with "--build_cmake=1" to build a compatible version',))
         #
         def_lines = []
-        options = []
-        if 'MPI_CC' in self.config_dict:
-            options += ['--CC={MPI_CC}', '--FC={MPI_FC}']
-        else:
-            options += ['--with-mpi-dir={MPI_ROOT}']
-        if config_dict['CC_VENDOR'] == 'gnu' and int(config_dict['CC_VERSION'].split(".")[0]) > 9:
-            options.append('--FFLAGS="-fallow-argument-mismatch -ffree-line-length-none"')
-        options += [
+        options = [
             '--download-metis',
             '--download-parmetis',
             '--with-x=no',
             '--with-ssl=0',
-            '--with-cmake-exec={CMAKE}'
+            '--with-cmake-exec={CMAKE}',
+            '--with-cuda=0'
         ]
+        if self.mpi_f08:
+            options += ['--with-mpi-ftn-module=mpi_f08']
         if self.shared_libs:
             options += ['--with-shared-libraries=1']
         else:
@@ -1996,18 +2011,28 @@ class PETSC(package):
         else:
             options += ['--with-blas-lib={BLAS_LIB_PATH}', '--with-lapack-lib={LAPACK_LIB_PATH}']
         #
+        if 'MPI_CC' in self.config_dict:
+            options += ['--CC={MPI_CC}', '--FC={MPI_FC}']
+        else:
+            options += ['--with-mpi-dir={MPI_ROOT}']
+        if config_dict['CC_VENDOR'] == 'gnu' and int(config_dict['CC_VERSION'].split(".")[0]) > 9:
+            options.append('--FFLAGS="-fallow-argument-mismatch -ffree-line-length-none"')
         if self.debug:
             options += ['--with-debugging=yes']
         else:
             options += ['--with-debugging=no']
             if config_dict['CC_VENDOR'] == 'gnu':
                 options += ['--COPTFLAGS=-O2', '--FOPTFLAGS=-O2']
-            # elif config_dict['CC_VENDOR'] == 'intel':
-            #     options += ['--COPTFLAGS=""', '--FOPTFLAGS=""']
+            elif config_dict['CC_VENDOR'] == 'intel':
+                options += ['--COPTFLAGS=""', '--FOPTFLAGS=""']
         if need_cxx:
             if 'MPI_CXX' not in self.config_dict:
                 error_exit('PETSc build as configured requires an MPI C++ compiler')
             options += ['--with-cxx={MPI_CXX}']
+            if config_dict['CC_VENDOR'] == 'gnu':
+                options += ['--CXXOPTFLAGS=-O2']
+            elif config_dict['CC_VENDOR'] == 'intel':
+                options += ['--CXXOPTFLAGS=""']
         else:
             options += ['--with-cxx=0']
         build_lines = def_lines + [
@@ -2024,11 +2049,12 @@ parser = argparse.ArgumentParser()
 parser.description = "Third-party library build script for the Open FUSION Toolkit"
 parser.add_argument("--download_only", action="store_true", default=False, help="Only download packages")
 parser.add_argument("--setup_only", action="store_true", default=False, help="Download and setup build, but do not actually build")
-parser.add_argument("--nthread", default=1, type=int, help="Number of threads to use for make (default=1)")
+parser.add_argument("--nthread", "--nthreads", default=1, type=int, help="Number of threads to use for make (default=1)")
 parser.add_argument("--opt_flags", default=None, type=str, help="Compiler optimization flags")
 parser.add_argument("--ld_flags", default=None, type=str, help="Linker flags")
-parser.add_argument("--macos_sdk_path", default=None, type=str, help="Path to macos SDK to use for building")
-parser.add_argument("--cross_compile_host", default=None, type=str, help="Host type for cross-compilation")
+parser.add_argument("--macos_sdk_path", default=None, type=str, help="Path to macOS SDK to use for building")
+parser.add_argument("--macos_deployment_target", default=None, type=str, help="macOS deployment target version, required for python package builds (e.g. 10.15)")
+parser.add_argument("--cross_compile_host", default=None, type=str, help="Host type for cross-compilation (unused)")
 parser.add_argument("--no_dl_progress", action="store_false", default=True, help="Do not report progress during file download")
 #
 group = parser.add_argument_group("CMAKE", "CMAKE configure options for the Open FUSION Toolkit")
@@ -2037,9 +2063,11 @@ group.add_argument("--oft_build_debug", default=0, type=int, choices=(0,1), help
 group.add_argument("--oft_build_python", default=1, type=int, choices=(0,1), help="Build OFT Python libraries? (default: 1)")
 group.add_argument("--oft_use_openmp", default=1, type=int, choices=(0,1), help="Build OFT with OpenMP support? (default: 1)")
 group.add_argument("--oft_build_tests", default=0, type=int, choices=(0,1), help="Build OFT tests? (default: 0)")
+group.add_argument("--oft_py_kernel", default="python3", type=str, help="Name of Jupyter kernel for testing Python examples (default: python3)")
 group.add_argument("--oft_build_examples", default=0, type=int, choices=(0,1), help="Build OFT examples? (default: 0)")
 group.add_argument("--oft_build_docs", default=0, type=int, choices=(0,1), help="Build OFT documentation (requires doxygen)? (default: 0)")
 group.add_argument("--oft_package", action="store_true", default=False, help="Perform a packaging build of OFT?")
+group.add_argument("--oft_package_python", default=1, type=int, choices=(0,1), help="Setup for build of PYPI wheels when packaging?")
 group.add_argument("--oft_package_release", action="store_true", default=False, help="Perform a release package of OFT?")
 group.add_argument("--oft_build_coverage", action="store_true", default=False, help="Build OFT with code coverage flags?")
 group.add_argument("--oft_debug_stack", action="store_true", default=False, help="Enable internal debug stack?")
@@ -2078,8 +2106,8 @@ group.add_argument("--lapack_lib_path", default=None, type=str, help="Path to pr
 group = parser.add_argument_group("METIS", "METIS package options")
 group.add_argument("--metis_wrapper", action="store_true", default=False, help="METIS included in compilers")
 #
-group = parser.add_argument_group("FoX XML", "FoX XML package options")
-group.add_argument("--build_fox", default=1, type=int, choices=(0,1), help="Build Fox XML library? (default: 1)")
+group = parser.add_argument_group("XML", "XML package options")
+group.add_argument("--libxml2_shared", action="store_true", default=False, help="Build and link Libxml2 as a shared library?")
 #
 group = parser.add_argument_group("OpenNURBS", "OpenNURBS package options")
 group.add_argument("--build_onurbs", default=0, type=int, choices=(0,1), help="Build OpenNURBS library? (default: 0)")
@@ -2133,10 +2161,22 @@ if options.ld_flags is not None:
     config_dict['LD_FLAGS'] = options.ld_flags
 if options.cross_compile_host is not None:
     config_dict['CROSS_COMPILE_HOST'] = options.cross_compile_host
-if options.macos_sdk_path is not None:
-    if not os.path.isdir(options.macos_sdk_path):
-        parser.exit(-1, 'Specified "--macos_sdk_path={0}" directory does not exist\n'.format(options.macos_sdk_path))
-    config_dict['MACOS_SDK_PATH'] = options.macos_sdk_path
+if config_dict['OS_TYPE'] == 'Darwin':
+    if options.macos_sdk_path is not None:
+        if not os.path.isdir(options.macos_sdk_path):
+            parser.exit(-1, 'Specified "--macos_sdk_path={0}" directory does not exist\n'.format(options.macos_sdk_path))
+        config_dict['MACOS_SDK_PATH'] = options.macos_sdk_path
+    if options.oft_package and (options.macos_deployment_target is not None):
+        config_dict['MACOSX_DEPLOYMENT_TARGET'] = options.macos_deployment_target
+    if options.oft_package and ('MACOSX_DEPLOYMENT_TARGET' not in config_dict):
+        macos_deployment_target = os.environ.get('MACOSX_DEPLOYMENT_TARGET',None)
+        if macos_deployment_target is not None:
+            config_dict['MACOSX_DEPLOYMENT_TARGET'] = macos_deployment_target
+        else:
+            if options.oft_package_python == 1:
+                parser.exit(-1, '"--macos_deployment_target" is required for Python package builds on macOS\n')
+            else:
+                print('Warning: "--macos_deployment_target" is recommended for package builds on macOS')
 # Building with MPI?
 use_mpi = False
 if (options.mpi_cc is not None) and (options.mpi_fc is not None):
@@ -2181,11 +2221,10 @@ else:
             packages.append(OpenBLAS(options.oblas_threads,options.oblas_dynamic_arch,options.oblas_no_avx))
 # MPI
 if use_mpi:
-    mpi_force_headers = options.mpi_use_headers or ((options.build_petsc == 1) or options.petsc_wrapper)
     if options.build_openmpi:
-        packages.append(OpenMPI(mpi_force_headers))
+        packages.append(OpenMPI(options.mpi_use_headers))
     elif options.build_mpich:
-        packages.append(MPICH(mpi_force_headers,options.mpich_version))
+        packages.append(MPICH(options.mpi_use_headers,options.mpich_version))
     elif (options.mpi_cc is not None) and (options.mpi_fc is not None):
         pass
     else:
@@ -2203,12 +2242,11 @@ if (options.hdf5_cc is not None) and (options.hdf5_fc is not None):
     packages.append(HDF5(parallel=(options.hdf5_parallel and use_mpi),cmake_build=options.hdf5_cmake_build,build_hl=HDF5_HL_required))
 else:
     packages.append(HDF5(parallel=(options.hdf5_parallel and use_mpi),cmake_build=options.hdf5_cmake_build,build_hl=HDF5_HL_required,shared_libs=(not options.hdf5_static)))
+# Always build Libxml2
+packages.append(LIBXML2(not options.libxml2_shared))
 # Are we building OpenNURBS?
 if options.build_onurbs == 1:
     packages.append(ONURBS())
-# Are we building FoX?
-if options.build_fox == 1:
-    packages.append(FOX())
 # Are we building ARPACK?
 if options.build_arpack == 1:
     packages.append(ARPACK(parallel=use_mpi, link_omp=options.oblas_threads))
@@ -2219,7 +2257,8 @@ if (options.build_netcdf == 1) or options.netcdf_wrapper:
 if (options.build_petsc == 1) or options.petsc_wrapper:
     packages.append(PETSC(debug=options.petsc_debug, with_openmp=options.petsc_openmp, with_superlu=options.petsc_superlu,
                           with_superlu_dist=options.petsc_superlu_dist, with_umfpack=options.petsc_umfpack,
-                          with_mumps=options.petsc_mumps, version=options.petsc_version, comp_wrapper=options.petsc_wrapper))
+                          with_mumps=options.petsc_mumps, version=options.petsc_version, comp_wrapper=options.petsc_wrapper,
+                          mpi_f08=(not options.mpi_use_headers)))
 else:
     packages.append(METIS(options.metis_wrapper))
     if (options.build_superlu == 1) or options.superlu_wrapper:
@@ -2236,6 +2275,7 @@ for package in packages:
 #
 # print(config_dict)
 if not (config_dict['DOWN_ONLY'] or config_dict['SETUP_ONLY']):
+    config_dict['OFT_PY_KERNEL'] = options.oft_py_kernel
     build_cmake_script(config_dict,
         build_debug=(options.oft_build_debug == 1),
         use_openmp=(options.oft_use_openmp == 1),

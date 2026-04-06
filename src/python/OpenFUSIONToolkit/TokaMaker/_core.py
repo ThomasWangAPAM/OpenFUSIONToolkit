@@ -9,11 +9,11 @@
 @date May 2023
 @ingroup doxy_oft_python
 '''
+import copy
 import collections
 import ctypes
 import numpy
 from ._interface import *
-
 
 def tokamaker_default_settings(oft_env):
     '''! Initialize settings object with default values
@@ -108,7 +108,9 @@ class TokaMaker():
         ## Coil set definitions, including sub-coils
         self.coil_sets = {}
         ## Virtual coils, if present (currently only `'#VSC'`)
-        self._virtual_coils = {'#VSC': -1}
+        self._virtual_coils = {'#VSC': {'id': -1 ,'facs': {}}}
+        ## Voltage coils dictionary. Currently only used for plotting on python side.
+        self._vcoils = {}
         ## Coil set names in order of id number
         self.coil_set_names = []
         ## Distribution coils, only (currently) saved for plotting utility
@@ -183,8 +185,9 @@ class TokaMaker():
         self._cond_dict = {}
         self._vac_dict = {}
         self._coil_dict = {}
+        self._vcoils = {}
         self.coil_sets = {}
-        self._virtual_coils = {}
+        self._virtual_coils = {'#VSC': {'id': -1 ,'facs': {}}}
         self._F0 = 0.0
         self._Ip_target=c_double(self._oft_env.float_disable_flag)
         self._Ip_ratio_target=c_double(self._oft_env.float_disable_flag)
@@ -415,10 +418,10 @@ class TokaMaker():
         ## Mesh regions [nc] 
         self.reg = numpy.ctypeslib.as_array(reg_loc,shape=(self.nc,))
 
-    ## @cond
+    # cond
     @property
     def alam(self):
-        r'''F*F' normalization value'''
+        r'''! F*F' normalization value'''
         if self._alam is not None:
             return self._alam[0]
         else:
@@ -433,7 +436,7 @@ class TokaMaker():
     
     @property
     def pnorm(self):
-        r'''Pressure normalization value'''
+        r'''! Pressure normalization value'''
         if self._pnorm is not None:
             return self._pnorm[0]
         else:
@@ -445,8 +448,8 @@ class TokaMaker():
             self._pnorm[0] = value
         else:
             raise ValueError('Class must be initialized to set "pnorm"')
-    ## @endcond
-    
+    # endcond    
+
     @property
     def diverted(self):
         r'''! Diverted flag (limited if `False`)'''
@@ -454,6 +457,58 @@ class TokaMaker():
             return self._diverted[0]
         else:
             return None
+    
+    def coil_dict2vec(self,coil_dict=None,keep_virtual=False,default_value=0.0):
+        '''! Create coil vector from dictionary of values
+
+        @param coil_dict Input dictionary
+        @param keep_virtual Keep virtual coils in vector instead of mapping to component coils
+        @param default_value Fill value for unspecified entries
+        @returns Ouput vector
+        '''
+        if coil_dict is None:
+            coil_dict = {}
+        vector = default_value*numpy.ones((self.ncoils+len(self._virtual_coils),))
+        removal_vector = numpy.zeros((self.ncoils+len(self._virtual_coils),))
+        for coil_key, value in coil_dict.items():
+            if coil_key in self.coil_sets:
+                vector[self.coil_sets[coil_key]['id']] += value
+                removal_vector[self.coil_sets[coil_key]['id']] = default_value
+            elif coil_key in self._virtual_coils:
+                if keep_virtual:
+                    vector[self._virtual_coils[coil_key]['id']] += value
+                    removal_vector[self._virtual_coils[coil_key]['id']] = default_value
+                else:
+                    for map_key, map_val in self._virtual_coils[coil_key].get('facs',{}).items():
+                        vector[self.coil_sets[map_key]['id']] += map_val*value
+                        removal_vector[self.coil_sets[map_key]['id']] = default_value
+            else:
+                raise KeyError('Unknown coil "{0}"'.format(coil_key))
+        vector -= removal_vector
+        if keep_virtual:
+            return vector
+        else:
+            return vector[:self.ncoils]
+    
+    def coil_vec2dict(self,coil_vec,always_virtual=False):
+        '''! Create coil value dictionary of from vector values
+
+        @param coil_vec Input vector
+        @param always_virtual Always include virtual coils even if not present in vector
+        @returns Ouput dictionary
+        '''
+        if (coil_vec.shape[0] != self.ncoils) and (coil_vec.shape[0] != self.ncoils+len(self._virtual_coils)):
+            raise ValueError('Input vector has incorrect length, should be {0} or {1}'.format(self.ncoils, self.ncoils+len(self._virtual_coils)))
+        coil_dict = {}
+        for coil_key in self.coil_sets:
+            coil_dict[coil_key] = coil_vec[self.coil_sets[coil_key]['id']]
+        if coil_vec.shape[0] > self.ncoils:
+            for coil_key in self._virtual_coils:
+                coil_dict[coil_key] = coil_vec[self._virtual_coils[coil_key]['id']]
+        elif always_virtual:
+            for coil_key in self._virtual_coils:
+                coil_dict[coil_key] = 0.0
+        return coil_dict
         
     def abspsi_to_normalized(self,psi_in):
         r'''! Convert unnormalized \f$ \psi \f$ values to normalized \f$ \hat{\psi} \f$ values
@@ -520,7 +575,7 @@ class TokaMaker():
                     if key in self.coil_sets:
                         reg_mat[self.coil_sets[key]['id'],i] = value
                     elif key in self._virtual_coils:
-                        reg_mat[self._virtual_coils[key],i] = value
+                        reg_mat[self._virtual_coils[key]['id'],i] = value
                     else:
                         raise KeyError('Unknown coil "{0}"'.format(key))
         elif reg_mat is not None:
@@ -539,7 +594,7 @@ class TokaMaker():
         else:
             raise ValueError('Either "reg_terms" or "reg_mat" is required')
         # Ensure VSC is constrained
-        if (self._virtual_coils.get('#VSC',-1) < 0) and ((abs(reg_mat[-1,:])).max() < 1.E-8):
+        if (not self._virtual_coils.get('#VSC',{}).get('facs',{})) and ((abs(reg_mat[-1,:])).max() < 1.E-8):
             new_row = numpy.zeros((self.ncoils+1,), dtype=numpy.float64)
             new_row[-1] = 1.0
             reg_mat = numpy.hstack((reg_mat,new_row.reshape([self.ncoils+1,1])))
@@ -560,9 +615,9 @@ class TokaMaker():
         Can be used with or without regularization terms (see
         @ref TokaMaker.TokaMaker.set_coil_reg "set_coil_reg").
 
-        @param coil_bounds Minimum and maximum allowable coil currents [ncoils+1,2]
+        @param coil_bounds Minimum and maximum allowable coil currents (dictionary of form `{coil_name: coil_bound[2]}`)
         '''
-        bounds_array = numpy.zeros((self.ncoils+1,2), dtype=numpy.float64)
+        bounds_array = numpy.zeros((self.ncoils+len(self._virtual_coils),2), dtype=numpy.float64)
         bounds_array[:,0] = -1.E98
         bounds_array[:,1] = 1.E98
         if coil_bounds is not None:
@@ -570,7 +625,7 @@ class TokaMaker():
                 if coil_key in self.coil_sets:
                     bounds_array[self.coil_sets[coil_key]['id'],:] = coil_bound
                 elif coil_key in self._virtual_coils:
-                    bounds_array[self._virtual_coils[coil_key],:] = coil_bound
+                    bounds_array[self._virtual_coils[coil_key]['id'],:] = coil_bound
                 else:
                     raise KeyError('Unknown coil "{0}"'.format(coil_key))
         error_string = self._oft_env.get_c_errorbuff()
@@ -583,13 +638,24 @@ class TokaMaker():
 
         @param coil_gains Gains for each coil (absolute scale is arbitrary)
         '''
-        gains_array = numpy.zeros((self.ncoils,), dtype=numpy.float64)
-        for coil_key, coil_gain in coil_gains.items():
-            gains_array[self.coil_sets[coil_key]['id']] = coil_gain
+        gains_array = numpy.ascontiguousarray(self.coil_dict2vec(coil_gains), dtype=numpy.float64)
         error_string = self._oft_env.get_c_errorbuff()
         tokamaker_set_coil_vsc(self._tMaker_ptr,gains_array,error_string)
         if error_string.value != b'':
             raise Exception(error_string.value)
+        self._virtual_coils['#VSC']['facs'] = coil_gains.copy()
+    
+    def set_vcoils(self,coil_resistances):
+        '''! Set or unset one or more coils as Vcoils by defining their lumped resistances
+
+        @param coil_resistances Lumped coil resistances for Vcoils [Ohms] (dictionary of form `{coil_name: coil_res}`)
+        '''
+        res_array = numpy.ascontiguousarray(self.coil_dict2vec(coil_resistances,default_value=-1.0), dtype=numpy.float64)
+        error_string = self._oft_env.get_c_errorbuff()
+        tokamaker_set_vcoil(self._tMaker_ptr,res_array,error_string)
+        if error_string.value != b'':
+            raise Exception(error_string.value)
+        self._vcoils = copy.deepcopy(coil_resistances)
 
     def init_psi(self, r0=-1.0, z0=0.0, a=0.0, kappa=0.0, delta=0.0, curr_source=None):
         r'''! Initialize \f$\psi\f$ using uniform current distributions
@@ -639,13 +705,10 @@ class TokaMaker():
     def set_profiles(self, ffp_prof=None, foffset=None, pp_prof=None, ffp_NI_prof=None, keep_files=False):
         r'''! Set flux function profiles (\f$F*F'\f$ and \f$P'\f$) using a piecewise linear definition
 
-        @param ffp_prof Dictionary object containing FF' profile ['y'] and sampled locations 
-        in normalized Psi ['x']
+        @param ffp_prof Dictionary object containing FF' profile ['y'] and sampled locations in normalized Psi ['x']
         @param foffset Value of \f$F0=R0*B0\f$
-        @param pp_prof Dictionary object containing P' profile ['y'] and sampled locations 
-        in normalized Psi ['x']
-        @param ffp_NI_prof Dictionary object containing non-inductive FF' profile ['y'] and sampled locations 
-        in normalized Psi ['x']
+        @param pp_prof Dictionary object containing P' profile ['y'] and sampled locations in normalized Psi ['x']
+        @param ffp_NI_prof Dictionary object containing non-inductive FF' profile ['y'] and sampled locations in normalized Psi ['x']
         @param keep_files Retain temporary profile files
         '''
         delete_files = []
@@ -659,7 +722,6 @@ class TokaMaker():
             pp_file = self._oft_env.unique_tmpfile('tokamaker_p.prof')
             create_prof_file(self, pp_file, pp_prof, "P'")
             delete_files.append(pp_file)
-        eta_file = 'none'
         ffp_NI_file = 'none'
         if ffp_NI_prof is not None:
             ffp_NI_file = self._oft_env.unique_tmpfile('tokamaker_ffp_NI.prof')
@@ -667,7 +729,7 @@ class TokaMaker():
             delete_files.append(ffp_NI_file)
         if foffset is not None:
             self._F0 = foffset
-        self.load_profiles(ffp_file,foffset,pp_file,eta_file,ffp_NI_file)
+        self.load_profiles(f_file=ffp_file,foffset=foffset,p_file=pp_file,f_NI_file=ffp_NI_file)
         if not keep_files:
             for file in delete_files:
                 try:
@@ -683,14 +745,11 @@ class TokaMaker():
 
         @param eta_prof Values defining $\eta$ [:,2]
         '''
-        ffp_file = 'none'
-        pp_file = 'none'
         eta_file = 'none'
         if eta_prof is not None:
             eta_file = 'tokamaker_eta.prof'
-            create_prof_file(self, eta_file, eta_prof, "eta'")
-        ffp_NI_file = 'none'
-        self.load_profiles(ffp_file,None,pp_file,eta_file,ffp_NI_file)
+            create_prof_file(self, eta_file, eta_prof, "eta")
+        self.load_profiles(eta_file=eta_file)
 
     def solve(self, vacuum=False):
         '''! Solve G-S equation with specified constraints, profiles, etc.
@@ -709,7 +768,7 @@ class TokaMaker():
         @note If isoflux, flux, or saddle constraints are desired use @ref solve instead.
         
         @param psi Boundary values for vacuum solve
-        @param rhs_source Current source (optional)
+        @param rhs_source Current source [A/m^2] (optional)
         '''
         if psi is None:
             psi = numpy.zeros((self.np,),dtype=numpy.float64)
@@ -1039,26 +1098,26 @@ class TokaMaker():
         r'''! Get toroidal current density from \f$ \psi \f$ through \f$ \Delta^{*} \f$ operator
  
         @param psi \f$ \psi \f$ corresponding to desired current density
-        @result \f$ J_{\phi} = \textrm{M}^{-1} \Delta^{*} \psi \f$
+        @result \f$ J_{\phi} = \textrm{M}^{-1} \Delta^{*} \psi \f$ [A/m^2]
         '''
         curr = numpy.copy(psi)
         error_string = self._oft_env.get_c_errorbuff()
         tokamaker_get_dels_curr(self._tMaker_ptr,curr,error_string)
         if error_string.value != b'':
             raise Exception(error_string.value)
-        return curr/mu0
+        return curr
     
     def get_jtor_plasma(self):
         r'''! Get plasma toroidal current density for current equilibrium
  
-        @result \f$ J_{\phi} \f$ by evalutating RHS source terms
+        @result \f$ J_{\phi} \f$ by evalutating RHS source terms [A/m^2]
         '''
         curr = numpy.zeros((self.np,), dtype=numpy.float64)
         error_string = self._oft_env.get_c_errorbuff()
         tokamaker_get_jtor(self._tMaker_ptr,curr,error_string)
         if error_string.value != b'':
             raise Exception(error_string.value)
-        return curr/mu0
+        return curr
 
     def get_psi(self,normalized=True):
         r'''! Get poloidal flux values on node points
@@ -1093,17 +1152,26 @@ class TokaMaker():
         if error_string.value != b'':
             raise Exception(error_string.value)
     
-    def set_psi_dt(self,psi0,dt):
+    def set_psi_dt(self,psi0,dt,coil_currents=None,coil_voltages=None):
         '''! Set reference poloidal flux and time step for eddy currents in .solve()
 
         @param psi0 Reference poloidal flux at t-dt (unnormalized)
         @param dt Time since reference poloidal flux
+        @param coil_currents Currents for Vcoils [A] (dictionary of form `{coil_name: coil_curr}`, defaults to current solution)
+        @param coil_voltages Voltages for Vcoils [V] (dictionary of form `{coil_name: coil_volt}`)
         '''
         if psi0.shape[0] != self.np:
             raise IndexError('Incorrect shape of "psi0", should be [np]')
         psi0 = numpy.ascontiguousarray(psi0, dtype=numpy.float64)
+        if coil_currents is None:
+            coil_currents, _ = self.get_coil_currents()
+        curr_array = numpy.ascontiguousarray(self.coil_dict2vec(coil_currents,keep_virtual=True), dtype=numpy.float64)
+        if coil_voltages is not None:
+            volt_array = numpy.ascontiguousarray(self.coil_dict2vec(coil_voltages,keep_virtual=True), dtype=numpy.float64)
+        else:
+            volt_array = numpy.ascontiguousarray(self.coil_dict2vec(None,keep_virtual=True), dtype=numpy.float64)
         error_string = self._oft_env.get_c_errorbuff()
-        tokamaker_set_psi_dt(self._tMaker_ptr,psi0,c_double(dt),error_string)
+        tokamaker_set_psi_dt(self._tMaker_ptr,psi0,curr_array,volt_array,c_double(dt),error_string)
         if error_string.value != b'':
             raise Exception(error_string.value)
     
@@ -1142,10 +1210,7 @@ class TokaMaker():
         tokamaker_get_coil_currents(self._tMaker_ptr,currents,currents_reg,error_string)
         if error_string.value != b'':
             raise Exception(error_string.value)
-        current_dict = {}
-        for coil_key, coil_set in self.coil_sets.items():
-            current_dict[coil_key] = currents[coil_set['id']]
-        return current_dict, currents_reg
+        return self.coil_vec2dict(currents), currents_reg
 
     def get_coil_Lmat(self):
         r'''! Get mutual inductance matrix between coils
@@ -1340,11 +1405,9 @@ class TokaMaker():
 
         @param currents Current in each coil [A]
         '''
-        current_array = numpy.zeros((self.ncoils,), dtype=numpy.float64)
-        if currents is not None:
-            for coil_key, coil_current in currents.items():
-                current_array[self.coil_sets[coil_key]['id']] = coil_current
-        #
+        if currents is None:
+            currents = {}
+        current_array = numpy.ascontiguousarray(self.coil_dict2vec(currents), dtype=numpy.float64)
         error_string = self._oft_env.get_c_errorbuff()
         tokamaker_set_coil_currents(self._tMaker_ptr,current_array,error_string)
         if error_string.value != b'':
@@ -1619,6 +1682,16 @@ class TokaMaker():
                 if cell_centered:
                     mesh_currents[mask_tmp] = numpy.sum(curr[self.lc[mask_tmp,:]],axis=1)/3.0
                 mask = numpy.logical_or(mask,mask_tmp)
+                
+        # Treat vcoils as conductors when looking at induced currents
+        for coil_name, coil_obj in self.coil_sets.items():
+            if coil_name in self._vcoils.keys():
+                for sub_coil in coil_obj["sub_coils"]:
+                    mask_tmp = self.reg == sub_coil['reg_id']
+                    if cell_centered:
+                        mesh_currents[mask_tmp] = numpy.mean(curr[self.lc[mask_tmp]],axis=1)
+                    mask = numpy.logical_or(mask,mask_tmp)
+        
         if cell_centered:
             return mask, mesh_currents
         else:
@@ -1657,6 +1730,16 @@ class TokaMaker():
                 if cond_reg.get('noncontinuous',False):
                     mesh_currents[mask_tmp] -= (mesh_currents[mask_tmp]*area[mask_tmp]).sum()/area[mask_tmp].sum()
                 mask = numpy.logical_or(mask,mask_tmp)
+
+        # Treat vcoils as conductors when looking at induced currents
+        for coil_name, coil_obj in self.coil_sets.items():
+            if coil_name in self._vcoils.keys():
+                for sub_coil in coil_obj["sub_coils"]:
+                    mask_tmp = self.reg == sub_coil['reg_id']
+                    field_tmp = -dpsi_dt/self._vcoils[coil_name]
+                    mesh_currents[mask_tmp] = numpy.mean(field_tmp[self.lc[mask_tmp]],axis=1)
+                    mask = numpy.logical_or(mask,mask_tmp)
+
         return mask, mesh_currents
     
     def plot_eddy(self,fig,ax,psi=None,dpsi_dt=None,nlevels=40,colormap='jet',clabel=r'$J_w$ [$A/m^2$]',symmap=False):
@@ -1683,6 +1766,9 @@ class TokaMaker():
             mask, plot_field = self.get_conductor_currents(psi,cell_centered=(nlevels < 0))
         elif dpsi_dt is not None:
             mask, plot_field = self.get_conductor_source(dpsi_dt)
+        if mask.sum() == 0:
+            print("Warning: No conducting regions to plot")
+            return None
         if plot_field.shape[0] == self.nc:
             if symmap:
                 max_curr = abs(plot_field).max()
@@ -1785,23 +1871,34 @@ class TokaMaker():
         if error_string.value != b'':
             raise Exception(error_string.value)
 
-    def set_coil_current_dist(self,coil_name,curr_dist):
+    def set_coil_current_dist(self,coil_name,curr_dist=None,normalize=False):
         '''! Overwrite coil with non-uniform current distribution.
 
         @param coil_name Name of coil to modify
-        @param curr_dist Relative current density [self.np]
+        @param curr_dist Relative current density [self.np] (None to disable non-uniform distribution and return to uniform current)
+        @param normalize Normalize distribution to have unit current?
         '''
-        if curr_dist.shape[0] != self.np:
-            raise IndexError('Incorrect shape of "curr_dist", should be [np]')
         if coil_name not in self.coil_sets:
             raise KeyError('Unknown coil "{0}"'.format(coil_name))
         iCoil = self.coil_sets[coil_name]['id']
-        self.dist_coils[iCoil] = curr_dist
-        curr_dist = numpy.ascontiguousarray(curr_dist, dtype=numpy.float64)
+        if curr_dist is None:
+            curr_dist = numpy.ones((self.np,), dtype=numpy.float64)
+            iCoil_c = c_int(-(iCoil+1))
+        else:
+            if curr_dist.shape != (self.np,):
+                raise ValueError('curr_dist must be the same shape as the number of points in the mesh ({0})'.format(self.np))
+            curr_dist = numpy.ascontiguousarray(curr_dist, dtype=numpy.float64)
+            iCoil_c = c_int(iCoil+1)
+        dist_coil_ptr = c_double_ptr()
         error_string = self._oft_env.get_c_errorbuff()
-        tokamaker_set_coil_current_dist(self._tMaker_ptr,c_int(iCoil+1),curr_dist,error_string)
+        tokamaker_set_coil_current_dist(self._tMaker_ptr,iCoil_c,curr_dist,ctypes.byref(dist_coil_ptr),c_bool(normalize),error_string)
         if error_string.value != b'':
             raise Exception(error_string.value)
+        # Update python side coil distribution if successful
+        if iCoil_c.value > 0:
+            self.dist_coils[iCoil] = numpy.ctypeslib.as_array(dist_coil_ptr,shape=(self.np,))
+        else:
+            self.dist_coils.pop(iCoil,None)
 
     def eig_wall(self,neigs=4,pm=False):
         r'''! Compute eigenvalues (\f$ 1 / \tau_{L/R} \f$) for conducting structures
@@ -1850,7 +1947,7 @@ class TokaMaker():
         if error_string.value != b'':
             raise Exception(error_string.value)
     
-    def step_td(self,time,dt):
+    def step_td(self,time,dt,coil_currents=None,coil_voltages=None):
         '''! Compute eigenvalues for the time-dependent system
 
         @param time Growth rate enhancement point (should be approximately expected value)
@@ -1863,223 +1960,15 @@ class TokaMaker():
         lin_its = c_int()
         nretry = c_int()
         error_string = self._oft_env.get_c_errorbuff()
-        tokamaker_step_td(self._tMaker_ptr,ctypes.byref(time),ctypes.byref(dt),ctypes.byref(nl_its),ctypes.byref(lin_its),ctypes.byref(nretry),error_string)
+        if coil_currents is None:
+            coil_currents, _ = self.get_coil_currents()
+        coil_currents = numpy.ascontiguousarray(self.coil_dict2vec(coil_currents), dtype=numpy.float64)
+        if coil_voltages is None:
+            coil_voltages = numpy.zeros((self.ncoils,), dtype=numpy.float64)
+        else:
+            coil_voltages = numpy.ascontiguousarray(self.coil_dict2vec(coil_voltages), dtype=numpy.float64)
+        tokamaker_step_td(self._tMaker_ptr,coil_currents,coil_voltages,ctypes.byref(time),ctypes.byref(dt),
+                          ctypes.byref(nl_its),ctypes.byref(lin_its),ctypes.byref(nretry),error_string)
         if error_string.value != b'':
             raise Exception(error_string.value)
         return time.value, dt.value, nl_its.value, lin_its.value, nretry.value
-
-
-def solve_with_bootstrap(self,ne,Te,ni,Ti,inductive_jtor,Zeff,jBS_scale=1.0,Zis=[1.],max_iterations=6,initialize_eq=True):
-    '''! Self-consistently compute bootstrap contribution from H-mode profiles,
-    and iterate solution until all functions of Psi converge. 
-
-    @note if using nis and Zis, dnis_dpsi must be specified in sauter_bootstrap() 
-    as a list of impurity gradients over Psi. See 
-    https://omfit.io/_modules/omfit_classes/utils_fusion.html for more 
-    detailed documentation 
-
-    @note if initialize_eq=True, cubic polynomials will be fit to the core of all 
-    kinetic profiles in order to flatten the pedestal. This will initialize the G-S 
-    solution at an estimated L-mode pressure profile and using the L-mode bootstrap 
-    contribution. Initializing the solver in L-mode before raising the pedestal 
-    height increases the likelihood that the solver will converge in H-mode.
-
-    @param ne Electron density profile, sampled over psi_norm
-    @param Te Electron temperature profile [eV], sampled over psi_norm
-    @param ni Ion density profile, sampled over psi_norm
-    @param Ti Ion temperature profile [eV], sampled over psi_norm
-    @param inductive_jtor Inductive toroidal current, sampled over psi_norm
-    @param Zeff Effective Z profile, sampled over psi_norm
-    @param scale_jBS Scalar which can scale bootstrap current profile
-    @param nis List of impurity density profiles; NOT USED
-    @param Zis List of impurity profile atomic numbers; NOT USED. 
-    @param max_iterations Maximum number of H-mode mygs.solve() iterations
-    @param initialize_eq Initialize equilibrium solve with flattened pedestal. 
-    @param return_jBS Return bootstrap profile alongside err_flag
-    '''
-    try:
-        from omfit_classes.utils_fusion import sauter_bootstrap
-    except:
-        raise ImportError('omfit_classes.utils_fusion not installed')
-    
-    def ffprime_from_jtor_pprime(jtor, pprime, R_avg, one_over_R_avg):
-        r'''! Convert from J_toroidal to FF' using Grad-Shafranov equation
-
-        @param jtor Toroidal current profile
-        @param R_avg Flux averaged R, calculated by TokaMaker
-        @param one_over_R_avg Flux averaged 1/R, calculated by TokaMaker
-        @param pprime dP/dPsi profile
-        '''
-        ffprime = 2.0*(jtor -  R_avg * (-pprime)) * (mu0 / one_over_R_avg)
-        return ffprime
-
-    kBoltz = eC
-    pressure = (kBoltz * ne * Te) + (kBoltz * ni * Ti) # 1.602e-19 * [m^-3] * [eV] = [Pa]
-
-    ### Set new pax target
-    self.set_targets(pax=pressure[0])
-
-    ### Reconstruct psi_norm and n_psi from input inductive_jtor
-    psi_norm = numpy.linspace(0.,1.,len(inductive_jtor))
-    n_psi = len(inductive_jtor)
-
-    def profile_iteration(self,pressure,ne,ni,Te,Ti,psi_norm,n_psi,Zeff,inductive_jtor,jBS_scale,Zis,include_jBS=True):
-
-        pprime = numpy.gradient(pressure) / (numpy.gradient(psi_norm) * (self.psi_bounds[1]-self.psi_bounds[0]))
-
-        ### Get final remaining quantities for Sauter from TokaMaker
-        psi,f,_,_,_ = self.get_profiles(npsi=n_psi)
-        _,fc,r_avgs,_ = self.sauter_fc(npsi=n_psi)
-        ft = 1 - fc # Trapped particle fraction on each flux surface
-        eps = r_avgs[2] / r_avgs[0] # Inverse aspect ratio
-        _,qvals,ravgs,_,_,_ = self.get_q(npsi=n_psi)
-        R_avg = ravgs[0]
-        one_over_R_avg = ravgs[1]
-        
-        if include_jBS:
-            ### Calculate flux derivatives for Sauter
-            dn_e_dpsi = numpy.gradient(ne) / (numpy.gradient(psi_norm) * (self.psi_bounds[1]-self.psi_bounds[0]))
-            dT_e_dpsi = numpy.gradient(Te) / (numpy.gradient(psi_norm) * (self.psi_bounds[1]-self.psi_bounds[0]))
-            dn_i_dpsi = numpy.gradient(ni) / (numpy.gradient(psi_norm) * (self.psi_bounds[1]-self.psi_bounds[0]))
-            dT_i_dpsi = numpy.gradient(Ti) / (numpy.gradient(psi_norm) * (self.psi_bounds[1]-self.psi_bounds[0]))
-
-            ### Solve for bootstrap current profile. See https://omfit.io/_modules/omfit_classes/utils_fusion.html for more detailed documentation 
-            j_BS_neo = sauter_bootstrap(
-                                    psi_N=psi_norm,
-                                    Te=Te,
-                                    Ti=Ti,
-                                    ne=ne,
-                                    p=pressure,
-                                    nis=[ni,],
-                                    Zis=Zis,
-                                    Zeff=Zeff,
-                                    gEQDSKs=[None],
-                                    R0=0., # not used
-                                    device=None,
-                                    psi_N_efit=None,
-                                    psiraw=psi*(self.psi_bounds[1]-self.psi_bounds[0]) + self.psi_bounds[0],
-                                    R=R_avg,
-                                    eps=eps, 
-                                    q=qvals,
-                                    fT=ft,
-                                    I_psi=f,
-                                    nt=1,
-                                    version='neo_2021',
-                                    debug_plots=False,
-                                    return_units=True,
-                                    return_package=False,
-                                    charge_number_to_use_in_ion_collisionality='Koh',
-                                    charge_number_to_use_in_ion_lnLambda='Zavg',
-                                    dT_e_dpsi=dT_e_dpsi,
-                                    dT_i_dpsi=dT_i_dpsi,
-                                    dn_e_dpsi=dn_e_dpsi,
-                                    dnis_dpsi=[dn_i_dpsi,],
-                                    )[0]
-                
-            inductive_jtor[-1] = 0. ### FORCING inductive_jtor TO BE ZERO AT THE EDGE
-            j_BS = j_BS_neo*(R_avg / f) ### Convert into [A/m^2]
-            j_BS *= jBS_scale ### Scale j_BS by user specified scalar
-            j_BS[-1] = 0. ### FORCING j_BS TO BE ZERO AT THE EDGE
-            jtor_total = inductive_jtor + j_BS
-        else:
-            j_BS = None
-            inductive_jtor[-1] = 0. ### FORCING inductive_jtor TO BE ZERO AT THE EDGE
-            jtor_total = inductive_jtor
-        
-        ffprime = ffprime_from_jtor_pprime(jtor_total, pprime, R_avg, one_over_R_avg)
-
-        ffp_prof = {
-            'type': 'linterp',
-            'x': psi_norm,
-            'y': ffprime / ffprime[0]
-        }
-
-        pp_prof = {
-            'type': 'linterp',
-            'x': psi_norm,
-            'y': pprime / pprime[0]
-        }
-
-        return pp_prof, ffp_prof, j_BS
-
-    if initialize_eq:
-        x_trimmed = psi_norm.tolist().copy()
-        ne_trimmed = ne.tolist().copy()
-        Te_trimmed = Te.tolist().copy()
-        ni_trimmed = ni.tolist().copy()
-        Ti_trimmed = Ti.tolist().copy()
-
-        ### Remove profile values from psi_norm ~0.5 to ~0.99, leaving single value at the edge
-        mid_index = int(len(x_trimmed)/2)
-        end_index = len(x_trimmed)-1
-        del x_trimmed[mid_index:end_index]
-        del ne_trimmed[mid_index:end_index]
-        del Te_trimmed[mid_index:end_index]
-        del ni_trimmed[mid_index:end_index]
-        del Ti_trimmed[mid_index:end_index]
-
-        ### Fit cubic polynomials through all core and one edge value
-        ne_model = numpy.poly1d(numpy.polyfit(x_trimmed, ne_trimmed, 3))
-        Te_model = numpy.poly1d(numpy.polyfit(x_trimmed, Te_trimmed, 3))
-        ni_model = numpy.poly1d(numpy.polyfit(x_trimmed, ni_trimmed, 3))
-        Ti_model = numpy.poly1d(numpy.polyfit(x_trimmed, Ti_trimmed, 3))
-
-        init_ne = ne_model(psi_norm)
-        init_Te = Te_model(psi_norm)
-        init_ni = ni_model(psi_norm)
-        init_Ti = Ti_model(psi_norm)
-
-        init_pressure = (kBoltz * init_ne * init_Te) + (kBoltz * init_ni * init_Ti)
-
-        ### Initialize equilibirum on L-mode-like P' and inductive j_tor profiles
-        print('>>> Initializing equilibrium with pedestal removed:')
-
-        init_pp_prof, init_ffp_prof, j_BS = profile_iteration(self,init_pressure,init_ne,init_ni,init_Te,init_Ti,psi_norm,n_psi,Zeff,inductive_jtor,jBS_scale,Zis,include_jBS=False)
-
-        init_pp_prof['y'][-1] = 0. # Enforce 0.0 at edge
-        init_ffp_prof['y'][-1] = 0. # Enforce 0.0 at edge
-
-        init_pp_prof['y'] = numpy.nan_to_num(init_pp_prof['y'])
-        init_ffp_prof['y'] = numpy.nan_to_num(init_ffp_prof['y'])
-
-        self.set_profiles(ffp_prof=init_ffp_prof,pp_prof=init_pp_prof)
-
-        try:
-            self.solve()
-            flag = 0
-        except ValueError:
-            flag = -1
-        print('  Solve flag: ', flag)
-
-    ### Specify original H-mode profiles, iterate on bootstrap contribution until reasonably converged
-    n = 0
-    flag = -1
-    print('>>> Iterating on H-mode equilibrium solution:')
-    while n < max_iterations:
-        print('> Iteration '+str(n)+':')
-
-        pp_prof, ffp_prof, j_BS = profile_iteration(self,pressure,ne,ni,Te,Ti,psi_norm,n_psi,Zeff,inductive_jtor,jBS_scale,Zis)
-
-        pp_prof['y'][-1] = 0. # Enforce 0.0 at edge
-        ffp_prof['y'][-1] = 0. # Enforce 0.0 at edge
-    
-        pp_prof['y'] = numpy.nan_to_num(pp_prof['y']) # Check for any nan's
-        ffp_prof['y'] = numpy.nan_to_num(ffp_prof['y']) # Check for any nan's
-
-        self.set_profiles(ffp_prof=ffp_prof,pp_prof=pp_prof)
-
-        try:
-            self.solve()
-            flag = 0
-        except ValueError:
-            flag = -1
-        print('  Solve flag: ', flag)
-
-        n += 1
-        if (n > 2) and (flag >= 0):
-            break
-        elif n >= max_iterations:
-            raise TypeError('H-mode equilibrium solve did not converge')
-    
-    return flag, j_BS
-
