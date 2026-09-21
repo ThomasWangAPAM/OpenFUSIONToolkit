@@ -370,7 +370,7 @@ class torus_fourier_sensor():
         ax.set_xlabel(r"$\phi$ (Toroidal Angle)")
         ax.set_ylabel(r"$\theta$ (Poloidal Angle)")
         cf = ax.contourf(phi_grid,theta_grid,np.flip(B_n_ifft.real,axis=1),levels=50,vmin=B_n_ifft.real.min(),vmax=B_n_ifft.real.max(),cmap="viridis")
-        cbar = fig.colorbar(cf,label="Minor Radial Magnetic Field")
+        cbar = fig.colorbar(cf,label="Outward Normal Magnetic Field")
         cbar.ax.ticklabel_format(style='sci', scilimits=(-3, 3))
         return cf, cbar
 
@@ -518,7 +518,7 @@ class torus_fourier_sensor():
             ax.set_xlabel(r"$\phi$ (radians)")
             ax.set_ylabel(r"$\theta$ (radians)")
             cf = ax.contourf(phi_grid,theta_grid,np.flip(B_n,axis=1),vmax=B_n.max(),vmin=B_n.min(),levels=50,cmap="RdBu_r")
-            cbar = fig.colorbar(cf,label="Minor Radial Magnetic Field (Tesla)")
+            cbar = fig.colorbar(cf,label="Outward Normal Magnetic Field (Tesla)")
             cbar.ax.ticklabel_format(style='sci', scilimits=(-3, 3))
             return cf, cbar
 
@@ -589,7 +589,7 @@ class torus_fourier_sensor():
         cf = ax.contourf(phi_grid, theta_grid, np.flip(amplitude, axis=1), 
                          vmax=amplitude.max(), vmin=amplitude.min(), levels=50, cmap="viridis")
         
-        cbar = fig.colorbar(cf, ax=ax, label="Minor Radial Magnetic Field (Tesla)")
+        cbar = fig.colorbar(cf, ax=ax, label="Outward Normal Magnetic Field (Tesla)")
         cbar.ax.ticklabel_format(style='sci', scilimits=(-3, 3))
         
         return cf, cbar
@@ -818,7 +818,7 @@ class torus_fourier_sensor():
         cbar.ax.ticklabel_format(style='sci', scilimits=(-3, 3))
         return cf, cbar
 
-    def plot_2D_fourier_amplitude(self,t,harmonics,ax,toroidal_harmonics=True,hamada_dphi=None,x_type='modes',x_mode_min=None,x_mode_max=None,sensor_mesh=None):
+    def plot_2D_fourier_amplitude(self,t,harmonics,ax,toroidal_harmonics=True,hamada_dphi=None,x_type='modes',x_mode_min=None,x_mode_max=None,sensor_mesh=None,part='ri'):
         '''! Plot the 2D Fast Fourier Transformed amplitude of the mesh of magnetic values against poloidal/toroidal harmonics/angles
 
         @param t The time step during the time evolution
@@ -830,8 +830,9 @@ class torus_fourier_sensor():
         @param x_mode_min The min of the (toroidal/poloidal) mode number to be visualized on x axis
         @param x_mode_max The max of the (toroidal/poloidal) mode number to be visualized on x axis
         @param sensor_mesh Customized sensor signal mesh to be used for FFT and plotting (often from frequency response calculation) [ntheta, nphi]
-        @result real_line_list The list of line objects of real amplitudes for each harmonic in `harmonics`
-        @result imag_line_list The list of line objects of imaginary amplitudes for each harmonic in `harmonics`
+        @param part Decomposition of the complex mode amplitudes to plot: 'ri' for real and imaginary parts (default) or 'ap' for total amplitude and phase (in radians)
+        @result line_list1 The list of line objects of the real parts (`part` = 'ri') or total amplitudes (`part` = 'ap') for each harmonic in `harmonics`
+        @result line_list2 The list of line objects of the imaginary parts (`part` = 'ri') or phases (`part` = 'ap') for each harmonic in `harmonics`
         '''
         if hamada_dphi is None:
             hamada_dphi = self.hamada_dphi
@@ -841,14 +842,20 @@ class torus_fourier_sensor():
             raise ValueError("Unsupported x variable is provided. Accepts 'modes' and 'angles' only.")
         elif x_type == 'modes' and (x_mode_min is None or x_mode_max is None):
             raise ValueError('For x_type == "modes", both mode_min and mode_max should be provided.')
-            
+        if part not in ['ri','ap']:
+            raise ValueError("Unsupported part is provided. Accepts 'ri' (real/imaginary) and 'ap' (amplitude/phase) only.")
+        if part == 'ap':
+            ylabel = "Mode Amplitude (Tesla) / Phase (radians)"
+        else:
+            ylabel = "Mode Amplitudes (Tesla)"
+
         if sensor_mesh is None:
             B = self.get_B_mesh(t)
         elif sensor_mesh.shape != (self.ntheta,self.nphi):
             raise ValueError("The shape of sensor_mesh does not match the sensor dimensions.")
         else:
             B = sensor_mesh
-            
+
         if hamada_dphi is None:
             B_n_fft, n_modes, m_modes = self.fft2(B)
         else:
@@ -863,83 +870,102 @@ class torus_fourier_sensor():
             if toroidal_harmonics:
                 m_range = np.where((m_modes_sorted == x_mode_min) | (m_modes_sorted == x_mode_max))[0]
                 mode_idx = [np.where(n_modes_sorted == harmonic)[0][0] for harmonic in harmonics]
-                real_line_list = []
-                imag_line_list = []
+                line_list1 = []
+                line_list2 = []
                 for i, idx in enumerate(mode_idx):
                     color = cmap(i/len(mode_idx))
-                    rline = ax.plot(m_modes_sorted[m_range[0]:m_range[1]+1],B_n_sorted[m_range[0]:m_range[1]+1,idx].real,color=color,label=f"n={harmonics[i]}, real")
-                    iline = ax.plot(m_modes_sorted[m_range[0]:m_range[1]+1],B_n_sorted[m_range[0]:m_range[1]+1,idx].imag,linestyle='--',color=color,label=f"n={harmonics[i]}, imag")
-                    real_line_list.append(rline)
-                    imag_line_list.append(iline)
+                    x_vals = m_modes_sorted[m_range[0]:m_range[1]+1]
+                    mode_vals = B_n_sorted[m_range[0]:m_range[1]+1,idx]
+                    if part == 'ri':
+                        line1 = ax.plot(x_vals,mode_vals.real,color=color,label=f"n={harmonics[i]}, real")
+                        line2 = ax.plot(x_vals,mode_vals.imag,linestyle='--',color=color,label=f"n={harmonics[i]}, imag")
+                    else:
+                        line1 = ax.plot(x_vals,np.abs(mode_vals),color=color,label=f"n={harmonics[i]}, amplitude")
+                        line2 = ax.plot(x_vals,np.angle(mode_vals),linestyle='--',color=color,label=f"n={harmonics[i]}, phase")
+                    line_list1.append(line1)
+                    line_list2.append(line2)
                 ax.legend()
                 ax.set_title(f"2D FFT Amplitudes of Toroidal Modes at [t] = {t}")
                 ax.set_xlabel(r"Poloidal Harmonics ($m$)")
-                ax.set_ylabel("Mode Amplitudes (Tesla)")
+                ax.set_ylabel(ylabel)
                 ax.set_xticks(range(x_mode_min,x_mode_max+1,2))
                 ax.grid()
                 ax.ticklabel_format(style='sci', scilimits=(-3,3), axis='y')
                 # plt.setp(ax.get_xticklabels(), rotation=30, ha='right')
-                return real_line_list, imag_line_list
+                return line_list1, line_list2
             else:
                 n_range = np.where((n_modes_sorted == x_mode_min) | (n_modes_sorted == x_mode_max))[0]
                 mode_idx = [np.where(m_modes_sorted == harmonic)[0][0] for harmonic in harmonics]
-                real_line_list = []
-                imag_line_list = []
+                line_list1 = []
+                line_list2 = []
                 for i, idx in enumerate(mode_idx):
                     color = cmap(i/len(mode_idx))
-                    rline = ax.plot(n_modes_sorted[n_range[0]:n_range[1]+1],B_n_sorted[idx,n_range[0]:n_range[1]+1].real,color=color,label=f"m={harmonics[i]}, real")
-                    iline = ax.plot(n_modes_sorted[n_range[0]:n_range[1]+1],B_n_sorted[idx,n_range[0]:n_range[1]+1].imag,linestyle='--',color=color,label=f"m={harmonics[i]}, imag")
-                    real_line_list.append(rline)
-                    imag_line_list.append(iline)
+                    x_vals = n_modes_sorted[n_range[0]:n_range[1]+1]
+                    mode_vals = B_n_sorted[idx,n_range[0]:n_range[1]+1]
+                    if part == 'ri':
+                        line1 = ax.plot(x_vals,mode_vals.real,color=color,label=f"m={harmonics[i]}, real")
+                        line2 = ax.plot(x_vals,mode_vals.imag,linestyle='--',color=color,label=f"m={harmonics[i]}, imag")
+                    else:
+                        line1 = ax.plot(x_vals,np.abs(mode_vals),color=color,label=f"m={harmonics[i]}, amplitude")
+                        line2 = ax.plot(x_vals,np.angle(mode_vals),linestyle='--',color=color,label=f"m={harmonics[i]}, phase")
+                    line_list1.append(line1)
+                    line_list2.append(line2)
                 ax.legend()
                 ax.set_title(f"2D FFT Amplitudes of Poloidal Modes at [t] = {t}")
                 ax.set_xlabel(r"Toroidal Harmonics ($n$)")
-                ax.set_ylabel("Mode Amplitudes (Tesla)")
+                ax.set_ylabel(ylabel)
                 ax.set_xticks(range(x_mode_min,x_mode_max+1,2))
                 ax.grid()
                 ax.ticklabel_format(style='sci', scilimits=(-3,3), axis='y')
                 # plt.setp(ax.get_xticklabels(), rotation=30, ha='right')
-                return real_line_list, imag_line_list
+                return line_list1, line_list2
         else:
             if toroidal_harmonics:
                 mode_idx = [np.where(n_modes == harmonic)[0][0] for harmonic in harmonics]
-                real_line_list = []
-                imag_line_list = []
+                line_list1 = []
+                line_list2 = []
                 for i, idx in enumerate(mode_idx):
-                    rline = ax.plot(self.theta_list,B_n_fft[:,idx].real,label=f"n={harmonics[i]}, real")
-                    iline = ax.plot(self.theta_list,B_n_fft[:,idx].imag,linestyle='--',label=f"n={harmonics[i]}, imag")
-                    real_line_list.append(rline)
-                    imag_line_list.append(iline)
+                    mode_vals = B_n_fft[:,idx]
+                    if part == 'ri':
+                        line1 = ax.plot(self.theta_list,mode_vals.real,label=f"n={harmonics[i]}, real")
+                        line2 = ax.plot(self.theta_list,mode_vals.imag,linestyle='--',label=f"n={harmonics[i]}, imag")
+                    else:
+                        line1 = ax.plot(self.theta_list,np.abs(mode_vals),label=f"n={harmonics[i]}, amplitude")
+                        line2 = ax.plot(self.theta_list,np.angle(mode_vals),linestyle='--',label=f"n={harmonics[i]}, phase")
+                    line_list1.append(line1)
+                    line_list2.append(line2)
                 ax.legend()
                 ax.set_title(f"2D FFT Amplitudes of Toroidal Modes at [t] = {t}")
                 ax.set_xlabel(r"$\theta$ (radians)")
-                ax.set_ylabel("Mode Amplitudes (Tesla)")
+                ax.set_ylabel(ylabel)
                 ax.ticklabel_format(style='sci', scilimits=(-3,3), axis='y')
                 # plt.setp(ax.get_xticklabels(), rotation=30, ha='right')
-                return real_line_list, imag_line_list
+                return line_list1, line_list2
             else:
                 mode_idx = [np.where(m_modes == harmonic)[0][0] for harmonic in harmonics]
                 phi_list = np.linspace(0,2*np.pi,self.nphi,endpoint=False)
-                real_line_list = []
-                imag_line_list = []
+                line_list1 = []
+                line_list2 = []
                 for i, idx in enumerate(mode_idx):
                     if self.helicity == -1:
-                        rline = ax.plot(phi_list,np.roll(B_n_fft[idx,:].real[::-1],shift=1),label=f"m={harmonics[i]}, real")
-                        iline = ax.plot(phi_list,np.roll(B_n_fft[idx,:].imag[::-1],shift=1),linestyle='--',label=f"m={harmonics[i]}, imag")
-                        real_line_list.append(rline)
-                        imag_line_list.append(iline)
+                        mode_vals = np.roll(B_n_fft[idx,:][::-1],shift=1)
                     else:
-                        rline = ax.plot(phi_list,B_n_fft[idx,:].real,label=f"m={harmonics[i]}, real")
-                        iline = ax.plot(phi_list,B_n_fft[idx,:].imag,linestyle='--',label=f"m={harmonics[i]}, imag")
-                        real_line_list.append(rline)
-                        imag_line_list.append(iline)
+                        mode_vals = B_n_fft[idx,:]
+                    if part == 'ri':
+                        line1 = ax.plot(phi_list,mode_vals.real,label=f"m={harmonics[i]}, real")
+                        line2 = ax.plot(phi_list,mode_vals.imag,linestyle='--',label=f"m={harmonics[i]}, imag")
+                    else:
+                        line1 = ax.plot(phi_list,np.abs(mode_vals),label=f"m={harmonics[i]}, amplitude")
+                        line2 = ax.plot(phi_list,np.angle(mode_vals),linestyle='--',label=f"m={harmonics[i]}, phase")
+                    line_list1.append(line1)
+                    line_list2.append(line2)
                 ax.legend()
                 ax.set_title(f"2D FFT Amplitudes of Poloidal Modes at [t] = {t}")
                 ax.set_xlabel(r"$\phi$ (radians)")
-                ax.set_ylabel("Mode Amplitudes (Tesla)")
+                ax.set_ylabel(ylabel)
                 ax.ticklabel_format(style='sci', scilimits=(-3,3), axis='y')
                 # plt.setp(ax.get_xticklabels(), rotation=30, ha='right')
-                return real_line_list, imag_line_list
+                return line_list1, line_list2
 
     def plot_sensor_signal_against_angle(self,t,ax,theta=True):
         '''! Plot the value of normal magnetic fields over theta/phi at at phi/theta = 0
