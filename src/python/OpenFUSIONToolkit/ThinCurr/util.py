@@ -818,21 +818,21 @@ class torus_fourier_sensor():
         cbar.ax.ticklabel_format(style='sci', scilimits=(-3, 3))
         return cf, cbar
 
-    def plot_2D_fourier_amplitude(self,t,harmonics,ax,toroidal_harmonics=True,hamada_dphi=None,x_type='modes',x_mode_min=None,x_mode_max=None,sensor_mesh=None,part='ri'):
+    def plot_2D_fourier_amplitude(self,t,harmonics,axes,toroidal_harmonics=True,hamada_dphi=None,x_type='modes',x_mode_min=None,x_mode_max=None,sensor_mesh=None,part='ri'):
         '''! Plot the 2D Fast Fourier Transformed amplitude of the mesh of magnetic values against poloidal/toroidal harmonics/angles
 
         @param t The time step during the time evolution
         @param harmonics List of (poloidal/toroidal) modes whose amplitudes are to be visualized in y axis [:]
-        @param ax Matplotlib axis for plotting
+        @param axes Matplotlib axis/axes for plotting: a single axis for `part` = 'ri', or exactly two axes for `part` = 'ap' (amplitude on the first, phase on the second)
         @param toroidal_harmonics Whether the input `harmonics` is toroidal or poloidal harmonics
         @param hamada_dphi Hamada phase shifts [ntheta]
         @param x_type The variable on x axis ('modes' or 'angles')
         @param x_mode_min The min of the (toroidal/poloidal) mode number to be visualized on x axis
         @param x_mode_max The max of the (toroidal/poloidal) mode number to be visualized on x axis
         @param sensor_mesh Customized sensor signal mesh to be used for FFT and plotting (often from frequency response calculation) [ntheta, nphi]
-        @param part Decomposition of the complex mode amplitudes to plot: 'ri' for real and imaginary parts (default) or 'ap' for total amplitude (left y axis) and phase in radians (right-hand twin y axis)
+        @param part Decomposition of the complex mode amplitudes to plot: 'ri' for real and imaginary parts (default, one axis) or 'ap' for total amplitude and phase in radians (two axes)
         @result line_list1 The list of line objects of the real parts (`part` = 'ri') or total amplitudes (`part` = 'ap') for each harmonic in `harmonics`
-        @result line_list2 The list of line objects of the imaginary parts (`part` = 'ri') or phases (`part` = 'ap', plotted on the twin axis) for each harmonic in `harmonics`
+        @result line_list2 The list of line objects of the imaginary parts (`part` = 'ri') or phases (`part` = 'ap', plotted on the second axis) for each harmonic in `harmonics`
         '''
         if hamada_dphi is None:
             hamada_dphi = self.hamada_dphi
@@ -844,11 +844,19 @@ class torus_fourier_sensor():
             raise ValueError('For x_type == "modes", both mode_min and mode_max should be provided.')
         if part not in ['ri','ap']:
             raise ValueError("Unsupported part is provided. Accepts 'ri' (real/imaginary) and 'ap' (amplitude/phase) only.")
+        if isinstance(axes,(list,tuple,np.ndarray)):
+            axes = list(axes)
+        else:
+            axes = [axes]
+        n_axes_expected = 1 if part == 'ri' else 2
+        if len(axes) != n_axes_expected:
+            raise ValueError(f'For part == "{part}", exactly {n_axes_expected} axis/axes should be provided, but {len(axes)} was/were given.')
+        ax = axes[0]
         if part == 'ap':
-            ax2 = ax.twinx()
+            ax_phase = axes[1]
             ylabel = "Mode Amplitude (Tesla)"
         else:
-            ax2 = None
+            ax_phase = None
             ylabel = "Mode Amplitudes (Tesla)"
 
         if sensor_mesh is None:
@@ -883,22 +891,23 @@ class torus_fourier_sensor():
                         line2 = ax.plot(x_vals,mode_vals.imag,linestyle='--',color=color,label=f"n={harmonics[i]}, imag")
                     else:
                         line1 = ax.plot(x_vals,np.abs(mode_vals),color=color,label=f"n={harmonics[i]}, amplitude")
-                        line2 = ax2.plot(x_vals,np.angle(mode_vals),linestyle='--',color=color,label=f"n={harmonics[i]}, phase")
+                        line2 = ax_phase.plot(x_vals,np.angle(mode_vals),linestyle='--',color=color,label=f"n={harmonics[i]}, phase")
                     line_list1.append(line1)
                     line_list2.append(line2)
-                if part == 'ap':
-                    handles1, labels1 = ax.get_legend_handles_labels()
-                    handles2, labels2 = ax2.get_legend_handles_labels()
-                    ax.legend(handles1+handles2,labels1+labels2)
-                    ax2.set_ylabel("Phase (radians)")
-                else:
-                    ax.legend()
+                ax.legend()
                 ax.set_title(f"2D FFT Amplitudes of Toroidal Modes at [t] = {t}")
                 ax.set_xlabel(r"Poloidal Harmonics ($m$)")
                 ax.set_ylabel(ylabel)
                 ax.set_xticks(range(x_mode_min,x_mode_max+1,2))
                 ax.grid()
                 ax.ticklabel_format(style='sci', scilimits=(-3,3), axis='y')
+                if part == 'ap':
+                    ax_phase.legend()
+                    ax_phase.set_title(f"2D FFT Phases of Toroidal Modes at [t] = {t}")
+                    ax_phase.set_xlabel(r"Poloidal Harmonics ($m$)")
+                    ax_phase.set_ylabel("Phase (radians)")
+                    ax_phase.set_xticks(range(x_mode_min,x_mode_max+1,2))
+                    ax_phase.grid()
                 # plt.setp(ax.get_xticklabels(), rotation=30, ha='right')
                 return line_list1, line_list2
             else:
@@ -915,22 +924,23 @@ class torus_fourier_sensor():
                         line2 = ax.plot(x_vals,mode_vals.imag,linestyle='--',color=color,label=f"m={harmonics[i]}, imag")
                     else:
                         line1 = ax.plot(x_vals,np.abs(mode_vals),color=color,label=f"m={harmonics[i]}, amplitude")
-                        line2 = ax2.plot(x_vals,np.angle(mode_vals),linestyle='--',color=color,label=f"m={harmonics[i]}, phase")
+                        line2 = ax_phase.plot(x_vals,np.angle(mode_vals),linestyle='--',color=color,label=f"m={harmonics[i]}, phase")
                     line_list1.append(line1)
                     line_list2.append(line2)
-                if part == 'ap':
-                    handles1, labels1 = ax.get_legend_handles_labels()
-                    handles2, labels2 = ax2.get_legend_handles_labels()
-                    ax.legend(handles1+handles2,labels1+labels2)
-                    ax2.set_ylabel("Phase (radians)")
-                else:
-                    ax.legend()
+                ax.legend()
                 ax.set_title(f"2D FFT Amplitudes of Poloidal Modes at [t] = {t}")
                 ax.set_xlabel(r"Toroidal Harmonics ($n$)")
                 ax.set_ylabel(ylabel)
                 ax.set_xticks(range(x_mode_min,x_mode_max+1,2))
                 ax.grid()
                 ax.ticklabel_format(style='sci', scilimits=(-3,3), axis='y')
+                if part == 'ap':
+                    ax_phase.legend()
+                    ax_phase.set_title(f"2D FFT Phases of Poloidal Modes at [t] = {t}")
+                    ax_phase.set_xlabel(r"Toroidal Harmonics ($n$)")
+                    ax_phase.set_ylabel("Phase (radians)")
+                    ax_phase.set_xticks(range(x_mode_min,x_mode_max+1,2))
+                    ax_phase.grid()
                 # plt.setp(ax.get_xticklabels(), rotation=30, ha='right')
                 return line_list1, line_list2
         else:
@@ -945,20 +955,19 @@ class torus_fourier_sensor():
                         line2 = ax.plot(self.theta_list,mode_vals.imag,linestyle='--',label=f"n={harmonics[i]}, imag")
                     else:
                         line1 = ax.plot(self.theta_list,np.abs(mode_vals),label=f"n={harmonics[i]}, amplitude")
-                        line2 = ax2.plot(self.theta_list,np.angle(mode_vals),linestyle='--',label=f"n={harmonics[i]}, phase")
+                        line2 = ax_phase.plot(self.theta_list,np.angle(mode_vals),linestyle='--',label=f"n={harmonics[i]}, phase")
                     line_list1.append(line1)
                     line_list2.append(line2)
-                if part == 'ap':
-                    handles1, labels1 = ax.get_legend_handles_labels()
-                    handles2, labels2 = ax2.get_legend_handles_labels()
-                    ax.legend(handles1+handles2,labels1+labels2)
-                    ax2.set_ylabel("Phase (radians)")
-                else:
-                    ax.legend()
+                ax.legend()
                 ax.set_title(f"2D FFT Amplitudes of Toroidal Modes at [t] = {t}")
                 ax.set_xlabel(r"$\theta$ (radians)")
                 ax.set_ylabel(ylabel)
                 ax.ticklabel_format(style='sci', scilimits=(-3,3), axis='y')
+                if part == 'ap':
+                    ax_phase.legend()
+                    ax_phase.set_title(f"2D FFT Phases of Toroidal Modes at [t] = {t}")
+                    ax_phase.set_xlabel(r"$\theta$ (radians)")
+                    ax_phase.set_ylabel("Phase (radians)")
                 # plt.setp(ax.get_xticklabels(), rotation=30, ha='right')
                 return line_list1, line_list2
             else:
@@ -976,20 +985,19 @@ class torus_fourier_sensor():
                         line2 = ax.plot(phi_list,mode_vals.imag,linestyle='--',label=f"m={harmonics[i]}, imag")
                     else:
                         line1 = ax.plot(phi_list,np.abs(mode_vals),label=f"m={harmonics[i]}, amplitude")
-                        line2 = ax2.plot(phi_list,np.angle(mode_vals),linestyle='--',label=f"m={harmonics[i]}, phase")
+                        line2 = ax_phase.plot(phi_list,np.angle(mode_vals),linestyle='--',label=f"m={harmonics[i]}, phase")
                     line_list1.append(line1)
                     line_list2.append(line2)
-                if part == 'ap':
-                    handles1, labels1 = ax.get_legend_handles_labels()
-                    handles2, labels2 = ax2.get_legend_handles_labels()
-                    ax.legend(handles1+handles2,labels1+labels2)
-                    ax2.set_ylabel("Phase (radians)")
-                else:
-                    ax.legend()
+                ax.legend()
                 ax.set_title(f"2D FFT Amplitudes of Poloidal Modes at [t] = {t}")
                 ax.set_xlabel(r"$\phi$ (radians)")
                 ax.set_ylabel(ylabel)
                 ax.ticklabel_format(style='sci', scilimits=(-3,3), axis='y')
+                if part == 'ap':
+                    ax_phase.legend()
+                    ax_phase.set_title(f"2D FFT Phases of Poloidal Modes at [t] = {t}")
+                    ax_phase.set_xlabel(r"$\phi$ (radians)")
+                    ax_phase.set_ylabel("Phase (radians)")
                 # plt.setp(ax.get_xticklabels(), rotation=30, ha='right')
                 return line_list1, line_list2
 
