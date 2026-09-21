@@ -890,8 +890,8 @@ class torus_fourier_sensor():
                         line1 = ax.plot(x_vals,mode_vals.real,color=color,label=f"n={harmonics[i]}, real")
                         line2 = ax.plot(x_vals,mode_vals.imag,linestyle='--',color=color,label=f"n={harmonics[i]}, imag")
                     else:
-                        line1 = ax.plot(x_vals,np.abs(mode_vals),color=color,label=f"n={harmonics[i]}, amplitude")
-                        line2 = ax_phase.plot(x_vals,np.angle(mode_vals),linestyle='--',color=color,label=f"n={harmonics[i]}, phase")
+                        line1 = ax.plot(x_vals,np.abs(mode_vals),color=color,label=f"n={harmonics[i]}")
+                        line2 = ax_phase.plot(x_vals,np.angle(mode_vals),linestyle='--',color=color,label=f"n={harmonics[i]}")
                     line_list1.append(line1)
                     line_list2.append(line2)
                 ax.legend()
@@ -923,8 +923,8 @@ class torus_fourier_sensor():
                         line1 = ax.plot(x_vals,mode_vals.real,color=color,label=f"m={harmonics[i]}, real")
                         line2 = ax.plot(x_vals,mode_vals.imag,linestyle='--',color=color,label=f"m={harmonics[i]}, imag")
                     else:
-                        line1 = ax.plot(x_vals,np.abs(mode_vals),color=color,label=f"m={harmonics[i]}, amplitude")
-                        line2 = ax_phase.plot(x_vals,np.angle(mode_vals),linestyle='--',color=color,label=f"m={harmonics[i]}, phase")
+                        line1 = ax.plot(x_vals,np.abs(mode_vals),color=color,label=f"m={harmonics[i]}")
+                        line2 = ax_phase.plot(x_vals,np.angle(mode_vals),linestyle='--',color=color,label=f"m={harmonics[i]}")
                     line_list1.append(line1)
                     line_list2.append(line2)
                 ax.legend()
@@ -954,8 +954,8 @@ class torus_fourier_sensor():
                         line1 = ax.plot(self.theta_list,mode_vals.real,label=f"n={harmonics[i]}, real")
                         line2 = ax.plot(self.theta_list,mode_vals.imag,linestyle='--',label=f"n={harmonics[i]}, imag")
                     else:
-                        line1 = ax.plot(self.theta_list,np.abs(mode_vals),label=f"n={harmonics[i]}, amplitude")
-                        line2 = ax_phase.plot(self.theta_list,np.angle(mode_vals),linestyle='--',label=f"n={harmonics[i]}, phase")
+                        line1 = ax.plot(self.theta_list,np.abs(mode_vals),label=f"n={harmonics[i]}")
+                        line2 = ax_phase.plot(self.theta_list,np.angle(mode_vals),linestyle='--',label=f"n={harmonics[i]}")
                     line_list1.append(line1)
                     line_list2.append(line2)
                 ax.legend()
@@ -984,8 +984,8 @@ class torus_fourier_sensor():
                         line1 = ax.plot(phi_list,mode_vals.real,label=f"m={harmonics[i]}, real")
                         line2 = ax.plot(phi_list,mode_vals.imag,linestyle='--',label=f"m={harmonics[i]}, imag")
                     else:
-                        line1 = ax.plot(phi_list,np.abs(mode_vals),label=f"m={harmonics[i]}, amplitude")
-                        line2 = ax_phase.plot(phi_list,np.angle(mode_vals),linestyle='--',label=f"m={harmonics[i]}, phase")
+                        line1 = ax.plot(phi_list,np.abs(mode_vals),label=f"m={harmonics[i]}")
+                        line2 = ax_phase.plot(phi_list,np.angle(mode_vals),linestyle='--',label=f"m={harmonics[i]}")
                     line_list1.append(line1)
                     line_list2.append(line2)
                 ax.legend()
